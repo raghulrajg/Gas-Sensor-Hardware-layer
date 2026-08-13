@@ -1,3 +1,5 @@
+#include <eez-framework.h>
+
 /*
   ESP32 + ILI9488 + LVGL 9.x + EEZ Studio UI
   --------------------------------------------
@@ -22,12 +24,15 @@
 
   FOLDER LAYOUT REQUIRED:
     <sketch_folder>/main_lvgl_eez.ino   <- this file
-    <sketch_folder>/ui/                 <- your unzipped EEZ export
-        screens.c / screens.h / ui.c / ui.h / images.c / images.h /
-        styles.c / styles.h / fonts.h / actions.h / vars.h / structs.h
-        (Arduino IDE compiles every .c/.cpp in the sketch folder and
-         its subfolders automatically, so just drop the ui/ folder
-         next to this .ino)
+    <sketch_folder>/screens.c / screens.h / ui.c / ui.h / images.c /
+      images.h / styles.c / styles.h / fonts.h / actions.h / vars.h /
+      structs.h / ui_image_*.c   <- all your EEZ Studio export files,
+        FLAT in the same folder as this .ino (NOT in a subfolder).
+        Arduino IDE only auto-compiles .c/.cpp files that sit directly
+        next to the .ino - it does NOT recurse into subfolders. If
+        these files are inside a "ui/" subfolder, ui.c and screens.c
+        never get compiled and you'll get "undefined reference to
+        ui_init" / "undefined reference to ui_tick" linker errors.
 
   LIBRARIES REQUIRED (Library Manager):
     - TFT_eSPI              (Bodmer)
@@ -67,8 +72,8 @@
 #include <XPT2046_Touchscreen.h>
 #include <lvgl.h>
 
-#include "ui/ui.h"
-#include "ui/screens.h"
+#include "ui.h"
+#include "screens.h"
 
 // ---------------- Display ----------------
 TFT_eSPI tft = TFT_eSPI();
