@@ -71,9 +71,94 @@
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <lvgl.h>
+#include <Wire.h>
+#include <Adafruit_AHT10.h>
+#include <string.h>
 
 #include "ui.h"
 #include "screens.h"
+
+// ---------------- Temperature / Humidity sensor (AHT10, I2C) ----------------
+Adafruit_AHT10 aht;
+bool aht_ok = false;
+unsigned long last_sensor_read = 0;
+const unsigned long SENSOR_READ_INTERVAL_MS = 1000; // read once per second
+
+// ---------------- calibration_bar / calibration_data (show_data screen) ----------------
+// show_data has ONE slider (calibration_bar) and ONE value label
+// (calibration_data), reused for whichever sensor was tapped on the
+// sensor_list screen. Which sensor that was is tracked by the EEZ Flow
+// global variable Sensor_ID (a text value, e.g. "TGS825") - the flow
+// already sets this when navigating here, and it's what drives the
+// sensor name shown at the top of this screen. We read that same
+// variable to pick the right 0-max range for the slider.
+#include "vars.h"
+#include "structs.h"
+
+static int32_t sensor_id_out_max(const char *sensor_id) {
+  if (!sensor_id) return 100;
+  if (strcmp(sensor_id, "TGS825")  == 0) return 50000;
+  if (strcmp(sensor_id, "TGS2802") == 0) return 10000;
+  if (strcmp(sensor_id, "TGS1820") == 0) return 50000;
+  if (strcmp(sensor_id, "MQ137")   == 0) return 10000;
+  if (strcmp(sensor_id, "MQ3")     == 0) return 10000;
+  if (strcmp(sensor_id, "MQ130")   == 0) return 50;
+  if (strcmp(sensor_id, "WSP2110") == 0) return 10;
+  return 100; // fallback if Sensor_ID doesn't match a known sensor
+}
+
+static void update_calibration_data() {
+  const char *sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
+  int32_t out_max = sensor_id_out_max(sensor_id);
+
+  int32_t raw = lv_slider_get_value(objects.calibration_bar); // 0-100 (LVGL default slider range)
+  int32_t mapped = lv_map(raw, 0, 100, 0, out_max);
+
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%ld", (long)mapped);
+  lv_label_set_text(objects.calibration_data, buf);
+}
+
+// Live update while dragging the slider.
+static void calibration_bar_event_cb(lv_event_t *e) {
+  update_calibration_data();
+}
+
+// Refresh the range/label whenever show_data becomes the active screen,
+// since Sensor_ID may have just changed (a different sensor was tapped
+// on sensor_list right before this screen loaded).
+static void show_data_screen_loaded_cb(lv_event_t *e) {
+  update_calibration_data();
+}
+
+// ---------------- Setting screen sliders -> value labels ----------------
+// The setting screen has its own 7 sliders (one per sensor), each with its
+// own adjacent label. Unlike show_data's single shared slider, these map
+// directly 1:1 - each slider always represents the same sensor.
+typedef struct {
+  lv_obj_t **slider;
+  lv_obj_t **label;
+  int32_t out_max;
+} sensor_slider_t;
+
+static sensor_slider_t sensor_sliders[] = {
+  { &objects.tgs_825,  &objects.tgs825_label,  50000 }, // TGS825:  0 - 50k
+  { &objects.tgs_2802, &objects.tgs2802_label, 10000 }, // TGS2802: 0 - 10k
+  { &objects.tgs_1820, &objects.tgs1820_label, 50000 }, // TGS1820: 0 - 50k
+  { &objects.mq_137,   &objects.mq137_label,   10000 }, // MQ137:   0 - 10k
+  { &objects.mq_3,     &objects.mq3_label,     10000 }, // MQ3:     0 - 10k
+  { &objects.mq_130,   &objects.mq130_label,   50 },    // MQ130:   0 - 50
+  { &objects.wsp_2110, &objects.wsp2110_label, 10 },    // WSP2110: 0 - 10
+};
+
+static void sensor_slider_event_cb(lv_event_t *e) {
+  sensor_slider_t *cfg = (sensor_slider_t *)lv_event_get_user_data(e);
+  int32_t raw = lv_slider_get_value(*(cfg->slider)); // 0-100 (LVGL default slider range)
+  int32_t mapped = lv_map(raw, 0, 100, 0, cfg->out_max);
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%ld", (long)mapped);
+  lv_label_set_text(*(cfg->label), buf);
+}
 
 // ---------------- Display ----------------
 TFT_eSPI tft = TFT_eSPI();
@@ -92,10 +177,10 @@ SPIClass touchSPI(HSPI);
 XPT2046_Touchscreen touch(TOUCH_CS, TOUCH_IRQ);
 
 // ---------------- Touch calibration (from your example, unchanged) ----------------
-#define TOUCH_MIN_X 3372
-#define TOUCH_MAX_X 554
-#define TOUCH_MIN_Y 3651
-#define TOUCH_MAX_Y 345
+#define TOUCH_MIN_X 3442
+#define TOUCH_MAX_X 442
+#define TOUCH_MIN_Y 3772
+#define TOUCH_MAX_Y 271
 
 // ---------------- LVGL draw buffer ----------------
 // IMPORTANT: These are heap-allocated (not static arrays) because static
@@ -191,6 +276,25 @@ void setup() {
   //     sensor_list/startup) ---
   ui_init();
 
+  // --- Wire up calibration_bar / calibration_data on the show_data screen ---
+  lv_obj_add_event_cb(objects.calibration_bar, calibration_bar_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(objects.show_data, show_data_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
+  update_calibration_data(); // populate the label immediately at boot
+
+  // --- Wire up the setting screen's 7 sensor sliders to their labels ---
+  for (size_t i = 0; i < sizeof(sensor_sliders) / sizeof(sensor_sliders[0]); i++) {
+    lv_obj_add_event_cb(*(sensor_sliders[i].slider), sensor_slider_event_cb, LV_EVENT_VALUE_CHANGED, &sensor_sliders[i]);
+    lv_obj_send_event(*(sensor_sliders[i].slider), LV_EVENT_VALUE_CHANGED, NULL);
+  }
+
+  // --- Temp/humidity sensor init ---
+  // AHT10 is I2C (Wire), so it doesn't conflict with the SPI buses used by
+  // the display and touch above.
+  aht_ok = aht.begin();
+  if (!aht_ok) {
+    Serial.println("AHT10 not found - check wiring. Continuing without sensor readings.");
+  }
+
   // --- Boot sequence: startup screen for 2s, then main screen ---
   lv_scr_load(objects.startup);
   startup_timer = lv_timer_create(go_to_main_screen, 2000, NULL);
@@ -200,5 +304,22 @@ void setup() {
 void loop() {
   lv_timer_handler();
   ui_tick();
+
+  // --- Update temperature/humidity labels on the show_data screen ---
+  if (aht_ok && millis() - last_sensor_read >= SENSOR_READ_INTERVAL_MS) {
+    last_sensor_read = millis();
+
+    sensors_event_t humidity_event, temp_event;
+    aht.getEvent(&humidity_event, &temp_event);
+
+    char temp_buf[16];
+    char hum_buf[16];
+    snprintf(temp_buf, sizeof(temp_buf), "%.1f C", temp_event.temperature);
+    snprintf(hum_buf, sizeof(hum_buf), "%.1f RH", humidity_event.relative_humidity);
+
+    lv_label_set_text(objects.temperature, temp_buf);
+    lv_label_set_text(objects.humidity, hum_buf);
+  }
+
   delay(5);
 }
