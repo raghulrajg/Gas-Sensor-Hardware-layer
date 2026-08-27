@@ -129,6 +129,61 @@ static void calibration_bar_event_cb(lv_event_t *e) {
 // on sensor_list right before this screen loaded).
 static void show_data_screen_loaded_cb(lv_event_t *e) {
   update_calibration_data();
+  configure_graph_range();
+}
+
+// ---------------- Real-time graph (FIFO circular buffer) ----------------
+// A fixed-size ring buffer holds the most recent GRAPH_BUFFER_SIZE samples.
+// New samples overwrite the oldest slot as the write index wraps around -
+// that wraparound is what makes it a FIFO circular buffer (oldest data
+// falls off as new data comes in, fixed memory footprint, no shifting
+// of existing elements). The LVGL chart is fed one new point per push via
+// lv_chart_set_next_value(), which visually scrolls the chart left to
+// match - the two stay in sync sample-for-sample.
+#define GRAPH_BUFFER_SIZE 30
+static int16_t graph_buffer[GRAPH_BUFFER_SIZE];
+static uint8_t graph_buffer_index = 0; // next write position, wraps at GRAPH_BUFFER_SIZE
+
+static lv_chart_series_t *graph_series = NULL;
+static int32_t graph_out_max = 100; // Y-axis max, updated per-sensor below
+unsigned long last_graph_update = 0;
+const unsigned long GRAPH_UPDATE_INTERVAL_MS = 1000; // one new point every 1s
+
+static void graph_buffer_push(int16_t value) {
+  graph_buffer[graph_buffer_index] = value;
+  graph_buffer_index = (graph_buffer_index + 1) % GRAPH_BUFFER_SIZE; // circular wrap
+}
+
+// Re-ranges the chart's Y-axis to match whichever sensor Sensor_ID
+// currently points to, reusing the same lookup the slider uses.
+static void configure_graph_range() {
+  const char *sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
+  graph_out_max = sensor_id_out_max(sensor_id);
+  lv_chart_set_range(objects.graph, LV_CHART_AXIS_PRIMARY_Y, 0, graph_out_max);
+}
+
+static void setup_graph() {
+  lv_chart_set_type(objects.graph, LV_CHART_TYPE_LINE);
+  lv_chart_set_point_count(objects.graph, GRAPH_BUFFER_SIZE);
+  lv_chart_set_update_mode(objects.graph, LV_CHART_UPDATE_MODE_SHIFT);
+  graph_series = lv_chart_add_series(objects.graph, lv_palette_main(LV_PALETTE_BLUE), LV_CHART_AXIS_PRIMARY_Y);
+
+  configure_graph_range();
+
+  // Seed the buffer and chart with initial points so it isn't empty at boot.
+  for (int i = 0; i < GRAPH_BUFFER_SIZE; i++) {
+    int16_t v = random(0, graph_out_max + 1); // TODO: replace with a real sensor reading
+    graph_buffer_push(v);
+    lv_chart_set_next_value(objects.graph, graph_series, v);
+  }
+}
+
+// Called periodically from loop(). Pushes one new sample into the FIFO
+// buffer and onto the chart.
+static void update_graph() {
+  int16_t value = random(0, graph_out_max + 1); // TODO: replace with a real sensor reading
+  graph_buffer_push(value);
+  lv_chart_set_next_value(objects.graph, graph_series, value);
 }
 
 // ---------------- Setting screen sliders -> value labels ----------------
@@ -177,9 +232,9 @@ SPIClass touchSPI(HSPI);
 XPT2046_Touchscreen touch(TOUCH_CS, TOUCH_IRQ);
 
 // ---------------- Touch calibration (from your example, unchanged) ----------------
-#define TOUCH_MIN_X 3442
+#define TOUCH_MIN_X 3600
 #define TOUCH_MAX_X 442
-#define TOUCH_MIN_Y 3772
+#define TOUCH_MIN_Y 3900
 #define TOUCH_MAX_Y 271
 
 // ---------------- LVGL draw buffer ----------------
@@ -232,14 +287,107 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data) {
 // ---------------- Startup -> Main screen transition ----------------
 static lv_timer_t *startup_timer;
 
+// ---------------- Required I2C devices ----------------
+// Checked once, right when the startup delay expires. If any are missing,
+// the boot halts on the startup screen with a warning instead of
+// continuing to the main screen.
+typedef struct {
+  uint8_t addr;
+  const char *name;
+} i2c_device_t;
+
+static const i2c_device_t required_i2c_devices[] = {
+  { 0x38, "AHT10" },
+  { 0x2C, "AD5252BRUZ50" },
+  { 0x2B, "AD5144ABRUZ10" },
+  { 0x49, "ADS1115IDGS" },
+  { 0x48, "ADS1115IDGS" },
+};
+
+static lv_obj_t *i2c_warning_panel = NULL;
+
+// Scans the bus for each required address. Returns true only if every
+// device acknowledged. Missing devices (name + address) are written into
+// missing_buf as a newline-separated list for display.
+static bool check_required_i2c_devices(char *missing_buf, size_t missing_buf_size) {
+  missing_buf[0] = '\0';
+  bool all_found = true;
+
+  for (size_t i = 0; i < sizeof(required_i2c_devices) / sizeof(required_i2c_devices[0]); i++) {
+    Wire.beginTransmission(required_i2c_devices[i].addr);
+    uint8_t result = Wire.endTransmission();
+
+    if (result != 0) {
+      all_found = false;
+      char line[48];
+      snprintf(line, sizeof(line), "0x%02X  %s\n", required_i2c_devices[i].addr, required_i2c_devices[i].name);
+      strncat(missing_buf, line, missing_buf_size - strlen(missing_buf) - 1);
+      Serial.print("I2C device not found: ");
+      Serial.println(line);
+    }
+  }
+
+  return all_found;
+}
+
+// Draws a red warning panel on top of the startup screen listing which
+// devices didn't respond. Only ever created once per boot.
+static void show_i2c_warning(const char *missing_list) {
+  if (i2c_warning_panel) return;
+
+  i2c_warning_panel = lv_obj_create(objects.startup);
+  lv_obj_set_size(i2c_warning_panel, 420, 240);
+  lv_obj_center(i2c_warning_panel);
+  lv_obj_set_style_bg_color(i2c_warning_panel, lv_color_hex(0xB00020), 0);
+  lv_obj_set_style_bg_opa(i2c_warning_panel, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(i2c_warning_panel, 8, 0);
+  lv_obj_set_style_border_width(i2c_warning_panel, 0, 0);
+  lv_obj_set_style_pad_all(i2c_warning_panel, 12, 0);
+  lv_obj_clear_flag(i2c_warning_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *title = lv_label_create(i2c_warning_panel);
+  lv_label_set_text(title, "I2C Device(s) Not Found");
+  lv_obj_set_style_text_color(title, lv_color_white(), 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+
+  lv_obj_t *body = lv_label_create(i2c_warning_panel);
+  lv_label_set_text(body, missing_list);
+  lv_obj_set_style_text_color(body, lv_color_white(), 0);
+  lv_obj_set_style_text_font(body, &lv_font_montserrat_14, 0);
+  lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(body, 380);
+  lv_obj_align(body, LV_ALIGN_CENTER, 0, 10);
+
+  lv_obj_t *footer = lv_label_create(i2c_warning_panel);
+  lv_label_set_text(footer, "Check wiring and power-cycle the device");
+  lv_obj_set_style_text_color(footer, lv_color_white(), 0);
+  lv_obj_set_style_text_font(footer, &lv_font_montserrat_14, 0);
+  lv_obj_align(footer, LV_ALIGN_BOTTOM_MID, 0, 0);
+}
+
 void go_to_main_screen(lv_timer_t *t) {
-  lv_scr_load_anim(objects.main, LV_SCR_LOAD_ANIM_FADE_IN, 300, 0, false);
   lv_timer_del(startup_timer);
   startup_timer = NULL;
+
+  char missing_list[200];
+  bool all_found = check_required_i2c_devices(missing_list, sizeof(missing_list));
+
+  if (!all_found) {
+    show_i2c_warning(missing_list);
+    return; // halt here - do not proceed to the main screen
+  }
+
+  lv_scr_load_anim(objects.main, LV_SCR_LOAD_ANIM_FADE_IN, 300, 0, false);
 }
 
 void setup() {
   Serial.begin(115200);
+
+  // I2C bus for AHT10 and the other required chips (checked below, and
+  // used by aht.begin() later) - init early so it's ready before the
+  // startup-screen timer fires.
+  Wire.begin();
 
   // --- Display on default VSPI bus ---
   tft.init();
@@ -280,6 +428,7 @@ void setup() {
   lv_obj_add_event_cb(objects.calibration_bar, calibration_bar_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
   lv_obj_add_event_cb(objects.show_data, show_data_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
   update_calibration_data(); // populate the label immediately at boot
+  setup_graph(); // configure the chart, series, and seed the FIFO buffer
 
   // --- Wire up the setting screen's 7 sensor sliders to their labels ---
   for (size_t i = 0; i < sizeof(sensor_sliders) / sizeof(sensor_sliders[0]); i++) {
@@ -319,6 +468,12 @@ void loop() {
 
     lv_label_set_text(objects.temperature, temp_buf);
     lv_label_set_text(objects.humidity, hum_buf);
+  }
+
+  // --- Push a new point into the real-time graph ---
+  if (millis() - last_graph_update >= GRAPH_UPDATE_INTERVAL_MS) {
+    last_graph_update = millis();
+    update_graph();
   }
 
   delay(5);
