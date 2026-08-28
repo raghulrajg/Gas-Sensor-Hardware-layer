@@ -9,9 +9,9 @@ extern "C" {
 
 extern const lv_img_dsc_t img_setting_button;
 extern const lv_img_dsc_t img_show_data;
-extern const lv_img_dsc_t img_sastra;
 extern const lv_img_dsc_t img_gas_sensor;
 extern const lv_img_dsc_t img_about;
+extern const lv_img_dsc_t img_boot_logo;
 
 #ifndef EXT_IMG_DESC_T
 #define EXT_IMG_DESC_T

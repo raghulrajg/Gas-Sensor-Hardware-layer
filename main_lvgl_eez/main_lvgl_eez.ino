@@ -121,11 +121,11 @@ typedef struct {
 
 static sensor_config_t sensor_configs[] = {
   { "TGS825",  &objects.tgs_825,  &objects.tgs825_label,  50000, DIGIPOT_AD5252,  &digipot_50k, 1, &ads2, 0 },
-  { "TGS2802", &objects.tgs_2802, &objects.tgs2802_label, 10000, DIGIPOT_AD5144A, &digipot_10k, 3, &ads2, 3 },
+  { "TGS2602", &objects.tgs_2602, &objects.tgs2602_label, 10000, DIGIPOT_AD5144A, &digipot_10k, 3, &ads2, 3 },
   { "TGS1820", NULL,              NULL,                   0,     DIGIPOT_NONE,    NULL,        0, &ads1, 3 }, // fixed resistance, no calibration
   { "MQ137",   &objects.mq_137,   &objects.mq137_label,   10000, DIGIPOT_AD5144A, &digipot_10k, 1, &ads2, 2 },
   { "MQ3",     &objects.mq_3,     &objects.mq3_label,     10000, DIGIPOT_AD5144A, &digipot_10k, 2, &ads1, 2 },
-  { "MQ130",   &objects.mq_130,   &objects.mq130_label,   50000, DIGIPOT_AD5252,  &digipot_50k, 0, &ads1, 0 },
+  { "MQ138",   &objects.mq_138,   &objects.mq138_label,   50000, DIGIPOT_AD5252,  &digipot_50k, 0, &ads1, 0 },
   { "WSP2110", &objects.wsp_2110, &objects.wsp2110_label, 10000, DIGIPOT_AD5144A, &digipot_10k, 0, &ads1, 1 },
 };
 
@@ -235,9 +235,9 @@ static int16_t read_current_sensor_mv() {
   int16_t adc_raw = cfg->ads->readADC_SingleEnded(cfg->ads_channel);
   float voltage = cfg->ads->computeVolts(adc_raw); // full float precision
 
-  Serial.print(cfg->name);
-  Serial.print(" voltage: ");
-  Serial.println(voltage, 6); // 6 decimal digits
+  // Serial.print(cfg->name);
+  // Serial.print(" voltage: ");
+  // Serial.println(voltage, 6); // 6 decimal digits
 
   int32_t mv = (int32_t)(voltage * 1000.0f);
   if (mv < 0) mv = 0;
@@ -418,7 +418,7 @@ static void show_i2c_warning(const char *missing_list) {
   lv_obj_clear_flag(i2c_warning_panel, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *title = lv_label_create(i2c_warning_panel);
-  lv_label_set_text(title, "I2C Device(s) Not Found");
+  lv_label_set_text(title, "Device(s) Not Found");
   lv_obj_set_style_text_color(title, lv_color_white(), 0);
   lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
@@ -516,8 +516,8 @@ void setup() {
 
   // TGS1820 is a fixed resistor - permanently hide its calibration slider
   // and label on the setting screen.
-  lv_obj_add_flag(objects.tgs_1820, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(objects.tgs1820_label, LV_OBJ_FLAG_HIDDEN);
+  // lv_obj_add_flag(objects.tgs_1820, LV_OBJ_FLAG_HIDDEN);
+  // lv_obj_add_flag(objects.tgs1820_label, LV_OBJ_FLAG_HIDDEN);
 
   // --- Wire up calibration_bar / calibration_data on the show_data screen ---
   lv_obj_add_event_cb(objects.calibration_bar, calibration_bar_event_cb, LV_EVENT_VALUE_CHANGED, NULL);

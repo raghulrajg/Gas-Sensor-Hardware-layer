@@ -13,7 +13,7 @@
 objects_t objects;
 
 static const char *screen_names[] = { "Main", "Setting", "Show Data", "About", "Sensor List", "startup" };
-static const char *object_names[] = { "main", "setting", "show_data", "about", "sensor_list", "startup", "panel_header", "title", "about_button", "setting_label", "show_data_label", "about_label", "setting_button", "show_data_button", "panel_header_1", "title_1", "back_button_1", "back_1", "obj0", "tgs_825", "tgs_2802", "tgs_1820", "mq_3", "mq_130", "mq_137", "wsp_2110", "tgs825_label", "tgs2802_label", "tgs1820_label", "mq3_label", "mq130_label", "mq137_label", "wsp2110_label", "panel_header_2", "title_2", "back_button", "back", "graph", "calibration_bar", "calibration_data", "obj1", "temperature", "humidity", "obj2", "panel_header_3", "title_3", "back_button_2", "back_2", "obj3", "panel_header_5", "title_5", "button_panel", "tgs825_button", "tgs2802_button", "wsp2110_button", "mq130_button", "tgs1820_button", "mq3_button", "mq137_button", "tgs825", "tgs2802", "tgs1820", "mq137", "mq3", "mq130", "wsp2110" };
+static const char *object_names[] = { "main", "setting", "show_data", "about", "sensor_list", "startup", "panel_header", "title", "about_button", "setting_label", "show_data_label", "about_label", "setting_button", "show_data_button", "panel_header_1", "title_1", "back_button_1", "back_1", "obj0", "tgs_825", "tgs_2602", "mq_3", "mq_138", "mq_137", "wsp_2110", "tgs825_label", "tgs2602_label", "mq3_label", "mq138_label", "mq137_label", "wsp2110_label", "panel_header_2", "title_2", "back_button", "back", "graph", "calibration_bar", "calibration_data", "obj1", "temperature", "humidity", "obj2", "panel_header_3", "title_3", "back_button_2", "back_2", "obj3", "panel_header_5", "title_5", "button_panel", "tgs825_button", "tgs2602_button", "wsp2110_button", "mq138_button", "tgs1820_button", "mq3_button", "mq137_button", "tgs825", "tgs2602", "tgs1820", "mq137", "mq3", "mq138", "wsp2110", "obj4", "boot_logo" };
 
 //
 // Event handlers
@@ -98,7 +98,7 @@ static void event_handler_cb_sensor_list_tgs825_button(lv_event_t *e) {
     }
 }
 
-static void event_handler_cb_sensor_list_tgs2802_button(lv_event_t *e) {
+static void event_handler_cb_sensor_list_tgs2602_button(lv_event_t *e) {
     lv_event_code_t event = lv_event_get_code(e);
     void *flowState = lv_event_get_user_data(e);
     (void)flowState;
@@ -120,7 +120,7 @@ static void event_handler_cb_sensor_list_wsp2110_button(lv_event_t *e) {
     }
 }
 
-static void event_handler_cb_sensor_list_mq130_button(lv_event_t *e) {
+static void event_handler_cb_sensor_list_mq138_button(lv_event_t *e) {
     lv_event_code_t event = lv_event_get_code(e);
     void *flowState = lv_event_get_user_data(e);
     (void)flowState;
@@ -347,8 +347,8 @@ void create_screen_setting() {
         {
             lv_obj_t *obj = lv_obj_create(parent_obj);
             objects.obj0 = obj;
-            lv_obj_set_pos(obj, 34, 98);
-            lv_obj_set_size(obj, 413, 316);
+            lv_obj_set_pos(obj, 28, 101);
+            lv_obj_set_size(obj, 425, 302);
             lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_style_bg_color(obj, lv_color_hex(0xffe5ebe5), LV_PART_MAIN | LV_STATE_DEFAULT);
             {
@@ -368,18 +368,10 @@ void create_screen_setting() {
                     lv_slider_set_value(obj, 25, LV_ANIM_OFF);
                 }
                 {
-                    // TGS_2802
+                    // TGS_2602
                     lv_obj_t *obj = lv_slider_create(parent_obj);
-                    objects.tgs_2802 = obj;
+                    objects.tgs_2602 = obj;
                     lv_obj_set_pos(obj, -3, 62);
-                    lv_obj_set_size(obj, 333, 9);
-                    lv_slider_set_value(obj, 25, LV_ANIM_OFF);
-                }
-                {
-                    // TGS_1820
-                    lv_obj_t *obj = lv_slider_create(parent_obj);
-                    objects.tgs_1820 = obj;
-                    lv_obj_set_pos(obj, -3, 108);
                     lv_obj_set_size(obj, 333, 9);
                     lv_slider_set_value(obj, 25, LV_ANIM_OFF);
                 }
@@ -387,53 +379,47 @@ void create_screen_setting() {
                     lv_obj_t *obj = lv_label_create(parent_obj);
                     lv_obj_set_pos(obj, 154, 38);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-                    lv_label_set_text(obj, "TGS 2802");
-                }
-                {
-                    lv_obj_t *obj = lv_label_create(parent_obj);
-                    lv_obj_set_pos(obj, 155, 85);
-                    lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-                    lv_label_set_text(obj, "TGS 1820");
+                    lv_label_set_text(obj, "TGS 2602");
                 }
                 {
                     // MQ_3
                     lv_obj_t *obj = lv_slider_create(parent_obj);
                     objects.mq_3 = obj;
-                    lv_obj_set_pos(obj, -3, 150);
+                    lv_obj_set_pos(obj, -3, 102);
                     lv_obj_set_size(obj, 333, 9);
                     lv_slider_set_value(obj, 25, LV_ANIM_OFF);
                 }
                 {
                     lv_obj_t *obj = lv_label_create(parent_obj);
-                    lv_obj_set_pos(obj, 165, 128);
+                    lv_obj_set_pos(obj, 165, 80);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_text(obj, "MQ 3");
                 }
                 {
-                    // MQ_130
+                    // MQ_138
                     lv_obj_t *obj = lv_slider_create(parent_obj);
-                    objects.mq_130 = obj;
-                    lv_obj_set_pos(obj, -3, 192);
+                    objects.mq_138 = obj;
+                    lv_obj_set_pos(obj, -3, 144);
                     lv_obj_set_size(obj, 333, 9);
                     lv_slider_set_value(obj, 25, LV_ANIM_OFF);
                 }
                 {
                     lv_obj_t *obj = lv_label_create(parent_obj);
-                    lv_obj_set_pos(obj, 165, 170);
+                    lv_obj_set_pos(obj, 165, 122);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-                    lv_label_set_text(obj, "MQ 130");
+                    lv_label_set_text(obj, "MQ 138");
                 }
                 {
                     // MQ_137
                     lv_obj_t *obj = lv_slider_create(parent_obj);
                     objects.mq_137 = obj;
-                    lv_obj_set_pos(obj, -2, 234);
+                    lv_obj_set_pos(obj, -2, 186);
                     lv_obj_set_size(obj, 332, 9);
                     lv_slider_set_value(obj, 25, LV_ANIM_OFF);
                 }
                 {
                     lv_obj_t *obj = lv_label_create(parent_obj);
-                    lv_obj_set_pos(obj, 165, 213);
+                    lv_obj_set_pos(obj, 165, 165);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_text(obj, "MQ 137");
                 }
@@ -441,13 +427,13 @@ void create_screen_setting() {
                     // WSP_2110
                     lv_obj_t *obj = lv_slider_create(parent_obj);
                     objects.wsp_2110 = obj;
-                    lv_obj_set_pos(obj, -2, 279);
+                    lv_obj_set_pos(obj, -2, 231);
                     lv_obj_set_size(obj, 332, 9);
                     lv_slider_set_value(obj, 25, LV_ANIM_OFF);
                 }
                 {
                     lv_obj_t *obj = lv_label_create(parent_obj);
-                    lv_obj_set_pos(obj, 158, 256);
+                    lv_obj_set_pos(obj, 158, 208);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_text(obj, "WSP 2110");
                 }
@@ -455,23 +441,15 @@ void create_screen_setting() {
                     // TGS825_label
                     lv_obj_t *obj = lv_label_create(parent_obj);
                     objects.tgs825_label = obj;
-                    lv_obj_set_pos(obj, 357, 16);
+                    lv_obj_set_pos(obj, 338, 15);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_text(obj, "25");
                 }
                 {
-                    // TGS2802_label
+                    // TGS2602_label
                     lv_obj_t *obj = lv_label_create(parent_obj);
-                    objects.tgs2802_label = obj;
-                    lv_obj_set_pos(obj, 357, 62);
-                    lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-                    lv_label_set_text(obj, "25");
-                }
-                {
-                    // TGS1820_label
-                    lv_obj_t *obj = lv_label_create(parent_obj);
-                    objects.tgs1820_label = obj;
-                    lv_obj_set_pos(obj, 357, 108);
+                    objects.tgs2602_label = obj;
+                    lv_obj_set_pos(obj, 338, 61);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_text(obj, "25");
                 }
@@ -479,15 +457,15 @@ void create_screen_setting() {
                     // MQ3_label
                     lv_obj_t *obj = lv_label_create(parent_obj);
                     objects.mq3_label = obj;
-                    lv_obj_set_pos(obj, 357, 150);
+                    lv_obj_set_pos(obj, 338, 101);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_text(obj, "25");
                 }
                 {
-                    // MQ130_label
+                    // MQ138_label
                     lv_obj_t *obj = lv_label_create(parent_obj);
-                    objects.mq130_label = obj;
-                    lv_obj_set_pos(obj, 357, 192);
+                    objects.mq138_label = obj;
+                    lv_obj_set_pos(obj, 338, 143);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_text(obj, "25");
                 }
@@ -495,7 +473,7 @@ void create_screen_setting() {
                     // MQ137_label
                     lv_obj_t *obj = lv_label_create(parent_obj);
                     objects.mq137_label = obj;
-                    lv_obj_set_pos(obj, 357, 227);
+                    lv_obj_set_pos(obj, 338, 178);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_text(obj, "25");
                 }
@@ -503,7 +481,7 @@ void create_screen_setting() {
                     // WSP2110_label
                     lv_obj_t *obj = lv_label_create(parent_obj);
                     objects.wsp2110_label = obj;
-                    lv_obj_set_pos(obj, 357, 272);
+                    lv_obj_set_pos(obj, 338, 223);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_label_set_text(obj, "25");
                 }
@@ -813,13 +791,13 @@ void create_screen_sensor_list() {
                     lv_obj_add_event_cb(obj, event_handler_cb_sensor_list_tgs825_button, LV_EVENT_ALL, flowState);
                 }
                 {
-                    // TGS2802_button
+                    // TGS2602_button
                     lv_obj_t *obj = lv_imagebutton_create(parent_obj);
-                    objects.tgs2802_button = obj;
+                    objects.tgs2602_button = obj;
                     lv_obj_set_pos(obj, 200, 1);
                     lv_obj_set_size(obj, 65, 65);
                     lv_imagebutton_set_src(obj, LV_IMAGEBUTTON_STATE_RELEASED, NULL, &img_gas_sensor, NULL);
-                    lv_obj_add_event_cb(obj, event_handler_cb_sensor_list_tgs2802_button, LV_EVENT_ALL, flowState);
+                    lv_obj_add_event_cb(obj, event_handler_cb_sensor_list_tgs2602_button, LV_EVENT_ALL, flowState);
                 }
                 {
                     // WSP2110_button
@@ -831,13 +809,13 @@ void create_screen_sensor_list() {
                     lv_obj_add_event_cb(obj, event_handler_cb_sensor_list_wsp2110_button, LV_EVENT_ALL, flowState);
                 }
                 {
-                    // MQ130_button
+                    // MQ138_button
                     lv_obj_t *obj = lv_imagebutton_create(parent_obj);
-                    objects.mq130_button = obj;
+                    objects.mq138_button = obj;
                     lv_obj_set_pos(obj, -4, 106);
                     lv_obj_set_size(obj, 65, 65);
                     lv_imagebutton_set_src(obj, LV_IMAGEBUTTON_STATE_RELEASED, NULL, &img_gas_sensor, NULL);
-                    lv_obj_add_event_cb(obj, event_handler_cb_sensor_list_mq130_button, LV_EVENT_ALL, flowState);
+                    lv_obj_add_event_cb(obj, event_handler_cb_sensor_list_mq138_button, LV_EVENT_ALL, flowState);
                 }
                 {
                     // TGS1820_button
@@ -876,13 +854,13 @@ void create_screen_sensor_list() {
                     lv_label_set_text(obj, "TGS825");
                 }
                 {
-                    // TGS2802
+                    // TGS2602
                     lv_obj_t *obj = lv_label_create(parent_obj);
-                    objects.tgs2802 = obj;
+                    objects.tgs2602 = obj;
                     lv_obj_set_pos(obj, 202, 58);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_obj_set_style_text_font(obj, &lv_font_montserrat_16, LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_label_set_text(obj, "TGS2802");
+                    lv_label_set_text(obj, "TGS2602");
                 }
                 {
                     // TGS1820
@@ -912,13 +890,13 @@ void create_screen_sensor_list() {
                     lv_label_set_text(obj, "MQ3");
                 }
                 {
-                    // MQ130
+                    // MQ138
                     lv_obj_t *obj = lv_label_create(parent_obj);
-                    objects.mq130 = obj;
+                    objects.mq138 = obj;
                     lv_obj_set_pos(obj, 5, 163);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
                     lv_obj_set_style_text_font(obj, &lv_font_montserrat_16, LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_label_set_text(obj, "MQ130");
+                    lv_label_set_text(obj, "MQ138");
                 }
                 {
                     // WSP2110
@@ -951,10 +929,21 @@ void create_screen_startup() {
     {
         lv_obj_t *parent_obj = obj;
         {
+            lv_obj_t *obj = lv_obj_create(parent_obj);
+            objects.obj4 = obj;
+            lv_obj_set_pos(obj, 0, 0);
+            lv_obj_set_size(obj, 480, 320);
+            lv_obj_set_style_bg_color(obj, lv_color_hex(0xff000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_radius(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+        {
+            // boot logo
             lv_obj_t *obj = lv_image_create(parent_obj);
-            lv_obj_set_pos(obj, 190, 147);
+            objects.boot_logo = obj;
+            lv_obj_set_pos(obj, 190, 114);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-            lv_image_set_src(obj, &img_sastra);
+            lv_image_set_src(obj, &img_boot_logo);
         }
     }
     
