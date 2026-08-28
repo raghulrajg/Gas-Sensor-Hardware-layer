@@ -73,6 +73,9 @@
 #include <lvgl.h>
 #include <Wire.h>
 #include <Adafruit_AHT10.h>
+#include <Adafruit_ADS1X15.h>
+#include <AD5252.h>
+#include <AD5144A.h>
 #include <string.h>
 
 #include "ui.h"
@@ -84,6 +87,66 @@ bool aht_ok = false;
 unsigned long last_sensor_read = 0;
 const unsigned long SENSOR_READ_INTERVAL_MS = 1000; // read once per second
 
+// ---------------- ADC + digital potentiometer hardware ----------------
+// Two ADS1115 16-bit ADCs (one channel per sensor's analog output) and two
+// digital potentiometers (AD5144A = 4-channel/10k, AD5252 = 2-channel/50k)
+// used to set each sensor's load-resistance calibration.
+#define ADS1_ADDR 0x48
+#define ADS2_ADDR 0x49
+#define DIGIPOT_10K_ADDR 0x2B // AD5144A, 4 channels, 0-10k ohm
+#define DIGIPOT_50K_ADDR 0x2C // AD5252,  2 channels, 0-50k ohm
+
+Adafruit_ADS1115 ads1; // 0x48
+Adafruit_ADS1115 ads2; // 0x49
+AD5144A digipot_10k(DIGIPOT_10K_ADDR);
+AD5252 digipot_50k(DIGIPOT_50K_ADDR);
+
+enum digipot_type_t { DIGIPOT_NONE, DIGIPOT_AD5144A, DIGIPOT_AD5252 };
+
+// One entry per sensor: its setting-screen slider/label (NULL for TGS1820,
+// which is a fixed resistor with no calibration control), which digipot
+// and channel controls its load resistance, and which ADS1115 + channel
+// reads its analog output for the graph.
+typedef struct {
+  const char *name;       // matches the Sensor_ID flow variable's value
+  lv_obj_t **slider;       // setting-screen slider (NULL = none)
+  lv_obj_t **label;        // setting-screen label (NULL = none)
+  int32_t pot_out_max;     // calibration range in ohms (0 = no digipot)
+  digipot_type_t pot_type;
+  void *pot;
+  uint8_t pot_channel;
+  Adafruit_ADS1115 *ads;
+  uint8_t ads_channel;
+} sensor_config_t;
+
+static sensor_config_t sensor_configs[] = {
+  { "TGS825",  &objects.tgs_825,  &objects.tgs825_label,  50000, DIGIPOT_AD5252,  &digipot_50k, 1, &ads2, 0 },
+  { "TGS2802", &objects.tgs_2802, &objects.tgs2802_label, 10000, DIGIPOT_AD5144A, &digipot_10k, 3, &ads2, 3 },
+  { "TGS1820", NULL,              NULL,                   0,     DIGIPOT_NONE,    NULL,        0, &ads1, 3 }, // fixed resistance, no calibration
+  { "MQ137",   &objects.mq_137,   &objects.mq137_label,   10000, DIGIPOT_AD5144A, &digipot_10k, 1, &ads2, 2 },
+  { "MQ3",     &objects.mq_3,     &objects.mq3_label,     10000, DIGIPOT_AD5144A, &digipot_10k, 2, &ads1, 2 },
+  { "MQ130",   &objects.mq_130,   &objects.mq130_label,   50000, DIGIPOT_AD5252,  &digipot_50k, 0, &ads1, 0 },
+  { "WSP2110", &objects.wsp_2110, &objects.wsp2110_label, 10000, DIGIPOT_AD5144A, &digipot_10k, 0, &ads1, 1 },
+};
+
+static sensor_config_t *find_sensor_config(const char *name) {
+  if (!name) return NULL;
+  for (size_t i = 0; i < sizeof(sensor_configs) / sizeof(sensor_configs[0]); i++) {
+    if (strcmp(sensor_configs[i].name, name) == 0) return &sensor_configs[i];
+  }
+  return NULL;
+}
+
+// Writes a 0-255 wiper value to whichever digipot the config points to.
+static void write_digipot(sensor_config_t *cfg, uint8_t raw) {
+  if (!cfg || cfg->pot_type == DIGIPOT_NONE) return;
+  if (cfg->pot_type == DIGIPOT_AD5144A) {
+    ((AD5144A *)cfg->pot)->write(cfg->pot_channel, raw);
+  } else if (cfg->pot_type == DIGIPOT_AD5252) {
+    ((AD5252 *)cfg->pot)->write(cfg->pot_channel, raw);
+  }
+}
+
 // ---------------- calibration_bar / calibration_data (show_data screen) ----------------
 // show_data has ONE slider (calibration_bar) and ONE value label
 // (calibration_data), reused for whichever sensor was tapped on the
@@ -91,32 +154,35 @@ const unsigned long SENSOR_READ_INTERVAL_MS = 1000; // read once per second
 // global variable Sensor_ID (a text value, e.g. "TGS825") - the flow
 // already sets this when navigating here, and it's what drives the
 // sensor name shown at the top of this screen. We read that same
-// variable to pick the right 0-max range for the slider.
+// variable to pick the sensor's config (range + digipot).
 #include "vars.h"
 #include "structs.h"
 
-static int32_t sensor_id_out_max(const char *sensor_id) {
-  if (!sensor_id) return 100;
-  if (strcmp(sensor_id, "TGS825")  == 0) return 50000;
-  if (strcmp(sensor_id, "TGS2802") == 0) return 10000;
-  if (strcmp(sensor_id, "TGS1820") == 0) return 50000;
-  if (strcmp(sensor_id, "MQ137")   == 0) return 10000;
-  if (strcmp(sensor_id, "MQ3")     == 0) return 10000;
-  if (strcmp(sensor_id, "MQ130")   == 0) return 50;
-  if (strcmp(sensor_id, "WSP2110") == 0) return 10;
-  return 100; // fallback if Sensor_ID doesn't match a known sensor
-}
-
 static void update_calibration_data() {
   const char *sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
-  int32_t out_max = sensor_id_out_max(sensor_id);
+  sensor_config_t *cfg = find_sensor_config(sensor_id);
+
+  if (!cfg || cfg->pot_type == DIGIPOT_NONE) {
+    // TGS1820 is a fixed resistor - no calibration control for it.
+    lv_obj_add_flag(objects.calibration_bar, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(objects.calibration_data, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+
+  lv_obj_clear_flag(objects.calibration_bar, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(objects.calibration_data, LV_OBJ_FLAG_HIDDEN);
 
   int32_t raw = lv_slider_get_value(objects.calibration_bar); // 0-100 (LVGL default slider range)
-  int32_t mapped = lv_map(raw, 0, 100, 0, out_max);
+  int32_t ohm_value = lv_map(raw, 0, 100, 0, cfg->pot_out_max);
 
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%ld", (long)mapped);
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%ld ohm", (long)ohm_value);
   lv_label_set_text(objects.calibration_data, buf);
+
+  // Slider's 0->max ohms maps to the digipot's wiper INVERTED (255->0):
+  // max resistance selected == wiper value 0.
+  uint8_t pot_raw = (uint8_t)lv_map(ohm_value, 0, cfg->pot_out_max, 255, 0);
+  write_digipot(cfg, pot_raw);
 }
 
 // Live update while dragging the slider.
@@ -129,7 +195,6 @@ static void calibration_bar_event_cb(lv_event_t *e) {
 // on sensor_list right before this screen loaded).
 static void show_data_screen_loaded_cb(lv_event_t *e) {
   update_calibration_data();
-  configure_graph_range();
 }
 
 // ---------------- Real-time graph (FIFO circular buffer) ----------------
@@ -139,13 +204,19 @@ static void show_data_screen_loaded_cb(lv_event_t *e) {
 // falls off as new data comes in, fixed memory footprint, no shifting
 // of existing elements). The LVGL chart is fed one new point per push via
 // lv_chart_set_next_value(), which visually scrolls the chart left to
-// match - the two stay in sync sample-for-sample.
+// match - the two stay in sync sample-for-sample. At one sample per
+// second (see GRAPH_UPDATE_INTERVAL_MS) and 30 points, the chart always
+// shows the last 30 seconds.
+//
+// Y-axis is a fixed 0-5V, stored as millivolts (0-5000) so LVGL's integer
+// chart points still give 1mV of plotting resolution. The underlying
+// ADS1115 reading keeps full float precision (see read_current_sensor_mv)
+// and is also printed to Serial with 6 decimal places.
 #define GRAPH_BUFFER_SIZE 30
 static int16_t graph_buffer[GRAPH_BUFFER_SIZE];
 static uint8_t graph_buffer_index = 0; // next write position, wraps at GRAPH_BUFFER_SIZE
 
 static lv_chart_series_t *graph_series = NULL;
-static int32_t graph_out_max = 100; // Y-axis max, updated per-sensor below
 unsigned long last_graph_update = 0;
 const unsigned long GRAPH_UPDATE_INTERVAL_MS = 1000; // one new point every 1s
 
@@ -154,65 +225,66 @@ static void graph_buffer_push(int16_t value) {
   graph_buffer_index = (graph_buffer_index + 1) % GRAPH_BUFFER_SIZE; // circular wrap
 }
 
-// Re-ranges the chart's Y-axis to match whichever sensor Sensor_ID
-// currently points to, reusing the same lookup the slider uses.
-static void configure_graph_range() {
+// Reads the ADS1115 channel for whichever sensor Sensor_ID currently
+// points to, returning millivolts (0-5000) clamped for chart plotting.
+static int16_t read_current_sensor_mv() {
   const char *sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
-  graph_out_max = sensor_id_out_max(sensor_id);
-  lv_chart_set_range(objects.graph, LV_CHART_AXIS_PRIMARY_Y, 0, graph_out_max);
+  sensor_config_t *cfg = find_sensor_config(sensor_id);
+  if (!cfg || !cfg->ads) return 0;
+
+  int16_t adc_raw = cfg->ads->readADC_SingleEnded(cfg->ads_channel);
+  float voltage = cfg->ads->computeVolts(adc_raw); // full float precision
+
+  Serial.print(cfg->name);
+  Serial.print(" voltage: ");
+  Serial.println(voltage, 6); // 6 decimal digits
+
+  int32_t mv = (int32_t)(voltage * 1000.0f);
+  if (mv < 0) mv = 0;
+  if (mv > 5000) mv = 5000;
+  return (int16_t)mv;
 }
 
 static void setup_graph() {
   lv_chart_set_type(objects.graph, LV_CHART_TYPE_LINE);
   lv_chart_set_point_count(objects.graph, GRAPH_BUFFER_SIZE);
   lv_chart_set_update_mode(objects.graph, LV_CHART_UPDATE_MODE_SHIFT);
+  lv_chart_set_range(objects.graph, LV_CHART_AXIS_PRIMARY_Y, 0, 5000); // 0-5V in mV
   graph_series = lv_chart_add_series(objects.graph, lv_palette_main(LV_PALETTE_BLUE), LV_CHART_AXIS_PRIMARY_Y);
 
-  configure_graph_range();
-
-  // Seed the buffer and chart with initial points so it isn't empty at boot.
+  // Seed the buffer and chart with real initial readings so it isn't
+  // empty at boot.
   for (int i = 0; i < GRAPH_BUFFER_SIZE; i++) {
-    int16_t v = random(0, graph_out_max + 1); // TODO: replace with a real sensor reading
-    graph_buffer_push(v);
-    lv_chart_set_next_value(objects.graph, graph_series, v);
+    int16_t mv = read_current_sensor_mv();
+    graph_buffer_push(mv);
+    lv_chart_set_next_value(objects.graph, graph_series, mv);
   }
 }
 
 // Called periodically from loop(). Pushes one new sample into the FIFO
 // buffer and onto the chart.
 static void update_graph() {
-  int16_t value = random(0, graph_out_max + 1); // TODO: replace with a real sensor reading
-  graph_buffer_push(value);
-  lv_chart_set_next_value(objects.graph, graph_series, value);
+  int16_t mv = read_current_sensor_mv();
+  graph_buffer_push(mv);
+  lv_chart_set_next_value(objects.graph, graph_series, mv);
 }
 
 // ---------------- Setting screen sliders -> value labels ----------------
-// The setting screen has its own 7 sliders (one per sensor), each with its
-// own adjacent label. Unlike show_data's single shared slider, these map
-// directly 1:1 - each slider always represents the same sensor.
-typedef struct {
-  lv_obj_t **slider;
-  lv_obj_t **label;
-  int32_t out_max;
-} sensor_slider_t;
-
-static sensor_slider_t sensor_sliders[] = {
-  { &objects.tgs_825,  &objects.tgs825_label,  50000 }, // TGS825:  0 - 50k
-  { &objects.tgs_2802, &objects.tgs2802_label, 10000 }, // TGS2802: 0 - 10k
-  { &objects.tgs_1820, &objects.tgs1820_label, 50000 }, // TGS1820: 0 - 50k
-  { &objects.mq_137,   &objects.mq137_label,   10000 }, // MQ137:   0 - 10k
-  { &objects.mq_3,     &objects.mq3_label,     10000 }, // MQ3:     0 - 10k
-  { &objects.mq_130,   &objects.mq130_label,   50 },    // MQ130:   0 - 50
-  { &objects.wsp_2110, &objects.wsp2110_label, 10 },    // WSP2110: 0 - 10
-};
-
+// The setting screen has its own slider per sensor (except TGS1820, which
+// has none - fixed resistance). Unlike show_data's single shared slider,
+// these map directly 1:1 - each slider always represents the same sensor -
+// and reuse the same sensor_configs[] table for range + digipot wiring.
 static void sensor_slider_event_cb(lv_event_t *e) {
-  sensor_slider_t *cfg = (sensor_slider_t *)lv_event_get_user_data(e);
+  sensor_config_t *cfg = (sensor_config_t *)lv_event_get_user_data(e);
   int32_t raw = lv_slider_get_value(*(cfg->slider)); // 0-100 (LVGL default slider range)
-  int32_t mapped = lv_map(raw, 0, 100, 0, cfg->out_max);
+  int32_t ohm_value = lv_map(raw, 0, 100, 0, cfg->pot_out_max);
+
   char buf[16];
-  snprintf(buf, sizeof(buf), "%ld", (long)mapped);
+  snprintf(buf, sizeof(buf), "%ld", (long)ohm_value);
   lv_label_set_text(*(cfg->label), buf);
+
+  uint8_t pot_raw = (uint8_t)lv_map(ohm_value, 0, cfg->pot_out_max, 255, 0);
+  write_digipot(cfg, pot_raw);
 }
 
 // ---------------- Display ----------------
@@ -424,16 +496,41 @@ void setup() {
   //     sensor_list/startup) ---
   ui_init();
 
+  // --- ADC + digipot hardware init ---
+  // Must happen before wiring any slider or calling setup_graph(), since
+  // both read/write through these device objects.
+  if (!ads1.begin(ADS1_ADDR)) {
+    Serial.println("ADS1115 @0x48 not found - check wiring.");
+  }
+  if (!ads2.begin(ADS2_ADDR)) {
+    Serial.println("ADS1115 @0x49 not found - check wiring.");
+  }
+  ads1.setGain(GAIN_TWOTHIRDS); // +/-6.144V range
+  ads2.setGain(GAIN_TWOTHIRDS);
+  if (!digipot_10k.begin()) {
+    Serial.println("AD5144A (10k digipot) not found - check wiring.");
+  }
+  if (!digipot_50k.begin()) {
+    Serial.println("AD5252 (50k digipot) not found - check wiring.");
+  }
+
+  // TGS1820 is a fixed resistor - permanently hide its calibration slider
+  // and label on the setting screen.
+  lv_obj_add_flag(objects.tgs_1820, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(objects.tgs1820_label, LV_OBJ_FLAG_HIDDEN);
+
   // --- Wire up calibration_bar / calibration_data on the show_data screen ---
   lv_obj_add_event_cb(objects.calibration_bar, calibration_bar_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
   lv_obj_add_event_cb(objects.show_data, show_data_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
   update_calibration_data(); // populate the label immediately at boot
   setup_graph(); // configure the chart, series, and seed the FIFO buffer
 
-  // --- Wire up the setting screen's 7 sensor sliders to their labels ---
-  for (size_t i = 0; i < sizeof(sensor_sliders) / sizeof(sensor_sliders[0]); i++) {
-    lv_obj_add_event_cb(*(sensor_sliders[i].slider), sensor_slider_event_cb, LV_EVENT_VALUE_CHANGED, &sensor_sliders[i]);
-    lv_obj_send_event(*(sensor_sliders[i].slider), LV_EVENT_VALUE_CHANGED, NULL);
+  // --- Wire up the setting screen's sensor sliders to their labels ---
+  // (skips TGS1820, whose slider field is NULL - fixed resistance)
+  for (size_t i = 0; i < sizeof(sensor_configs) / sizeof(sensor_configs[0]); i++) {
+    if (sensor_configs[i].slider == NULL) continue;
+    lv_obj_add_event_cb(*(sensor_configs[i].slider), sensor_slider_event_cb, LV_EVENT_VALUE_CHANGED, &sensor_configs[i]);
+    lv_obj_send_event(*(sensor_configs[i].slider), LV_EVENT_VALUE_CHANGED, NULL);
   }
 
   // --- Temp/humidity sensor init ---
