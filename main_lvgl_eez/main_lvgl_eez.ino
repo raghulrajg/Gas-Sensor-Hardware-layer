@@ -159,6 +159,27 @@ static void write_digipot(sensor_config_t *cfg, uint8_t raw) {
   }
 }
 
+// ---------------- PC application link (connection state) ----------------
+// Declared up here (ahead of the calibration callbacks below) so both the
+// setting-screen sliders and the show_data shared slider can notify the PC
+// the moment the physical touchscreen changes a value - see
+// notify_pc_calibration(). The rest of the PC link (serial parsing, D:
+// streaming) lives further down, near send_current_data_to_pc().
+static bool pc_connected = false;
+static unsigned long last_pc_heartbeat_ms = 0;
+const unsigned long PC_TIMEOUT_MS = 3000;
+
+// Pushes an unsolicited "C:<gas_index>:<value>\n" to the PC so it stays in
+// sync when the value changed locally (on-device slider), not from a PC
+// command. Only sent while a PC is actually connected.
+static void notify_pc_calibration(sensor_config_t *cfg, int32_t raw_value) {
+  if (!pc_connected || !cfg) return;
+  Serial.print("C:");
+  Serial.print(cfg->gas_index);
+  Serial.print(":");
+  Serial.println((float)raw_value, 2);
+}
+
 // ---------------- calibration_bar / calibration_data (show_data screen) ----------------
 // show_data has ONE slider (calibration_bar) and ONE value label
 // (calibration_data), reused for whichever sensor was tapped on the
@@ -197,9 +218,17 @@ static void update_calibration_data() {
   write_digipot(cfg, pot_raw);
 }
 
-// Live update while dragging the slider.
+// Live update while dragging the slider. Also pushes the new value to the
+// PC (if connected), since this is a locally (physically) driven change.
 static void calibration_bar_event_cb(lv_event_t *e) {
   update_calibration_data();
+
+  const char *sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
+  sensor_config_t *cfg = find_sensor_config(sensor_id);
+  if (cfg && cfg->pot_type != DIGIPOT_NONE) {
+    int32_t raw = lv_slider_get_value(objects.calibration_bar);
+    notify_pc_calibration(cfg, raw);
+  }
 }
 
 // Refresh the range/label whenever show_data becomes the active screen,
@@ -297,6 +326,8 @@ static void sensor_slider_event_cb(lv_event_t *e) {
 
   uint8_t pot_raw = (uint8_t)lv_map(ohm_value, 0, cfg->pot_out_max, 255, 0);
   write_digipot(cfg, pot_raw);
+
+  notify_pc_calibration(cfg, raw);
 }
 
 // ---------------- PC application link ----------------
@@ -317,10 +348,8 @@ static void sensor_slider_event_cb(lv_event_t *e) {
 // alone. If nothing arrives for PC_TIMEOUT_MS, we mark it disconnected and
 // stop streaming "D:" lines entirely (per your requirement to not waste
 // cycles/UART time when nothing is listening).
-static bool pc_connected = false;
-static unsigned long last_pc_heartbeat_ms = 0;
-const unsigned long PC_TIMEOUT_MS = 3000;
-
+// (pc_connected / last_pc_heartbeat_ms / PC_TIMEOUT_MS are declared earlier,
+// alongside notify_pc_calibration(), so the slider callbacks can use them.)
 static unsigned long last_data_stream_ms = 0;
 
 static char serial_line_buf[64];
