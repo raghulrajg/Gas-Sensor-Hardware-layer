@@ -86,6 +86,8 @@ Adafruit_AHT10 aht;
 bool aht_ok = false;
 unsigned long last_sensor_read = 0;
 const unsigned long SENSOR_READ_INTERVAL_MS = 1000; // read once per second
+static float last_temperature_c = 0;
+static float last_humidity_rh = 0;
 
 // ---------------- ADC + digital potentiometer hardware ----------------
 // Two ADS1115 16-bit ADCs (one channel per sensor's analog output) and two
@@ -117,22 +119,32 @@ typedef struct {
   uint8_t pot_channel;
   Adafruit_ADS1115 *ads;
   uint8_t ads_channel;
+  uint8_t gas_index;       // 1-based index used by the PC app's C:<index>:<value> protocol
 } sensor_config_t;
 
+// gas_index values match config.CHANNELS in the PC app exactly:
+// 1=TGS825 2=TGS2602 3=MQ137 4=TGS1820 5=MQ138 6=WSP2110 7=MQ3
 static sensor_config_t sensor_configs[] = {
-  { "TGS825",  &objects.tgs_825,  &objects.tgs825_label,  50000, DIGIPOT_AD5252,  &digipot_50k, 1, &ads2, 0 },
-  { "TGS2602", &objects.tgs_2602, &objects.tgs2602_label, 10000, DIGIPOT_AD5144A, &digipot_10k, 3, &ads2, 3 },
-  { "TGS1820", NULL,              NULL,                   0,     DIGIPOT_NONE,    NULL,        0, &ads1, 3 }, // fixed resistance, no calibration
-  { "MQ137",   &objects.mq_137,   &objects.mq137_label,   10000, DIGIPOT_AD5144A, &digipot_10k, 1, &ads2, 2 },
-  { "MQ3",     &objects.mq_3,     &objects.mq3_label,     10000, DIGIPOT_AD5144A, &digipot_10k, 2, &ads1, 2 },
-  { "MQ138",   &objects.mq_138,   &objects.mq138_label,   50000, DIGIPOT_AD5252,  &digipot_50k, 0, &ads1, 0 },
-  { "WSP2110", &objects.wsp_2110, &objects.wsp2110_label, 10000, DIGIPOT_AD5144A, &digipot_10k, 0, &ads1, 1 },
+  { "TGS825",  &objects.tgs_825,  &objects.tgs825_label,  50000, DIGIPOT_AD5252,  &digipot_50k, 1, &ads2, 0, 1 },
+  { "TGS2602", &objects.tgs_2602, &objects.tgs2602_label, 10000, DIGIPOT_AD5144A, &digipot_10k, 3, &ads2, 3, 2 },
+  { "TGS1820", NULL,              NULL,                   0,     DIGIPOT_NONE,    NULL,        0, &ads1, 3, 4 }, // fixed resistance, no calibration
+  { "MQ137",   &objects.mq_137,   &objects.mq137_label,   10000, DIGIPOT_AD5144A, &digipot_10k, 1, &ads2, 2, 3 },
+  { "MQ3",     &objects.mq_3,     &objects.mq3_label,     10000, DIGIPOT_AD5144A, &digipot_10k, 2, &ads1, 2, 7 },
+  { "MQ138",   &objects.mq_138,   &objects.mq138_label,   50000, DIGIPOT_AD5252,  &digipot_50k, 0, &ads1, 0, 5 },
+  { "WSP2110", &objects.wsp_2110, &objects.wsp2110_label, 10000, DIGIPOT_AD5144A, &digipot_10k, 0, &ads1, 1, 6 },
 };
 
 static sensor_config_t *find_sensor_config(const char *name) {
   if (!name) return NULL;
   for (size_t i = 0; i < sizeof(sensor_configs) / sizeof(sensor_configs[0]); i++) {
     if (strcmp(sensor_configs[i].name, name) == 0) return &sensor_configs[i];
+  }
+  return NULL;
+}
+
+static sensor_config_t *find_sensor_by_gas_index(int gas_index) {
+  for (size_t i = 0; i < sizeof(sensor_configs) / sizeof(sensor_configs[0]); i++) {
+    if (sensor_configs[i].gas_index == gas_index) return &sensor_configs[i];
   }
   return NULL;
 }
@@ -235,9 +247,9 @@ static int16_t read_current_sensor_mv() {
   int16_t adc_raw = cfg->ads->readADC_SingleEnded(cfg->ads_channel);
   float voltage = cfg->ads->computeVolts(adc_raw); // full float precision
 
-  // Serial.print(cfg->name);
-  // Serial.print(" voltage: ");
-  // Serial.println(voltage, 6); // 6 decimal digits
+  Serial.print(cfg->name);
+  Serial.print(" voltage: ");
+  Serial.println(voltage, 6); // 6 decimal digits
 
   int32_t mv = (int32_t)(voltage * 1000.0f);
   if (mv < 0) mv = 0;
@@ -287,6 +299,150 @@ static void sensor_slider_event_cb(lv_event_t *e) {
   write_digipot(cfg, pot_raw);
 }
 
+// ---------------- PC application link ----------------
+// Protocol (matches https://github.com/raghulrajg/Gas-Sensor-Monitor):
+//   Device -> PC : "D:g1,g2,g3,g4,g5,g6,g7,temp,humidity\n"
+//                   7 gas readings (in gas_index 1-7 order) + temp + humidity
+//   PC -> Device : "C:<gas_index>:<value 0-100>\n"  - set that sensor's calibration
+//   PC -> Device : "R:SETTINGS\n"                    - device replies with 7x "C:i:v\n"
+//   PC -> Device : "H\n"                             - heartbeat (see below)
+//
+// Their app has no baked-in "are you still there" signal (only writes when a
+// slider moves), so there's no way to tell "PC connected but idle" apart
+// from "PC gone" without one. This adds a lightweight heartbeat: the PC side
+// needs a matching one-line addition (see the serial_worker.py patch) that
+// sends "H\n" once a second. ANY recognized line from the PC (heartbeat,
+// calibration command, or settings request) counts as "still connected" and
+// resets the timeout - so an active user isn't dependent on the heartbeat
+// alone. If nothing arrives for PC_TIMEOUT_MS, we mark it disconnected and
+// stop streaming "D:" lines entirely (per your requirement to not waste
+// cycles/UART time when nothing is listening).
+static bool pc_connected = false;
+static unsigned long last_pc_heartbeat_ms = 0;
+const unsigned long PC_TIMEOUT_MS = 3000;
+
+static unsigned long last_data_stream_ms = 0;
+
+static char serial_line_buf[64];
+static uint8_t serial_line_len = 0;
+
+// Applies a PC-driven calibration command to the matching sensor: writes
+// the digipot, and keeps both the setting-screen slider and (if that
+// sensor is the one currently shown) the show_data screen's shared slider
+// in visual sync with the PC's value.
+static void apply_pc_calibration(int gas_index, float value_0_100) {
+  if (value_0_100 < 0) value_0_100 = 0;
+  if (value_0_100 > 100) value_0_100 = 100;
+
+  sensor_config_t *cfg = find_sensor_by_gas_index(gas_index);
+  if (!cfg) return; // unknown index - ignore
+
+  if (cfg->pot_type == DIGIPOT_NONE) return; // e.g. TGS1820 - nothing to apply
+
+  int32_t ohm_value = lv_map((int32_t)(value_0_100 * 10), 0, 1000, 0, cfg->pot_out_max);
+  uint8_t pot_raw = (uint8_t)lv_map(ohm_value, 0, cfg->pot_out_max, 255, 0);
+  write_digipot(cfg, pot_raw);
+
+  if (cfg->slider) {
+    lv_slider_set_value(*(cfg->slider), (int32_t)value_0_100, LV_ANIM_OFF);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%ld", (long)ohm_value);
+    lv_label_set_text(*(cfg->label), buf);
+  }
+
+  // If this sensor is also the one currently shown on show_data, keep that
+  // screen's shared slider/label in sync too.
+  const char *active_sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
+  if (active_sensor_id && strcmp(active_sensor_id, cfg->name) == 0) {
+    lv_slider_set_value(objects.calibration_bar, (int32_t)value_0_100, LV_ANIM_OFF);
+    update_calibration_data();
+  }
+}
+
+// Replies to "R:SETTINGS" with each sensor's current calibration, one
+// "C:<gas_index>:<value>\n" line per sensor, in gas_index order.
+static void send_settings_to_pc() {
+  for (int idx = 1; idx <= 7; idx++) {
+    sensor_config_t *cfg = find_sensor_by_gas_index(idx);
+    if (!cfg) continue;
+    float value = 0;
+    if (cfg->slider) value = (float)lv_slider_get_value(*(cfg->slider));
+    Serial.print("C:");
+    Serial.print(idx);
+    Serial.print(":");
+    Serial.println(value, 2);
+  }
+}
+
+// Parses one complete line received from the PC.
+static void process_serial_line(const char *line) {
+  // Any recognized traffic (heartbeat included) counts as "PC present".
+  last_pc_heartbeat_ms = millis();
+  pc_connected = true;
+
+  if (strcmp(line, "H") == 0) {
+    return; // heartbeat only
+  }
+
+  if (strncmp(line, "R:SETTINGS", 10) == 0) {
+    send_settings_to_pc();
+    return;
+  }
+
+  if (line[0] == 'C' && line[1] == ':') {
+    int idx = 0;
+    float value = 0;
+    if (sscanf(line, "C:%d:%f", &idx, &value) == 2) {
+      apply_pc_calibration(idx, value);
+    }
+    return;
+  }
+
+  // Unknown line - ignore.
+}
+
+// Non-blocking line reader: accumulates characters until '\n'/'\r', then
+// hands the completed line to process_serial_line(). Called every loop().
+static void handle_serial_commands() {
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      if (serial_line_len > 0) {
+        serial_line_buf[serial_line_len] = '\0';
+        process_serial_line(serial_line_buf);
+        serial_line_len = 0;
+      }
+    } else if (serial_line_len < sizeof(serial_line_buf) - 1) {
+      serial_line_buf[serial_line_len++] = c;
+    }
+    // else: line too long/malformed - drop the overflow silently
+  }
+}
+
+// Reads all 7 gas sensors (not just whichever is on-screen) plus the last
+// temp/humidity reading, and prints one "D:" line - only ever called while
+// pc_connected is true.
+static void send_current_data_to_pc() {
+  Serial.print("D:");
+  for (int idx = 1; idx <= 7; idx++) {
+    sensor_config_t *cfg = find_sensor_by_gas_index(idx);
+    float voltage = 0;
+    if (cfg && cfg->ads) {
+      int16_t adc_raw = cfg->ads->readADC_SingleEnded(cfg->ads_channel);
+      voltage = cfg->ads->computeVolts(adc_raw);
+    }
+    // NOTE: this sends raw sensor voltage, not ppm - converting to ppm
+    // needs each sensor's datasheet resistance-ratio curve, which isn't
+    // available here. The PC app just plots whatever numbers arrive.
+    Serial.print(voltage, 2);
+    Serial.print(",");
+  }
+  Serial.print(last_temperature_c, 2);
+  Serial.print(",");
+  Serial.println(last_humidity_rh, 2);
+}
+
 // ---------------- Display ----------------
 TFT_eSPI tft = TFT_eSPI();
 
@@ -305,9 +461,9 @@ XPT2046_Touchscreen touch(TOUCH_CS, TOUCH_IRQ);
 
 // ---------------- Touch calibration (from your example, unchanged) ----------------
 #define TOUCH_MIN_X 3600
-#define TOUCH_MAX_X 442
+#define TOUCH_MAX_X 500
 #define TOUCH_MIN_Y 3900
-#define TOUCH_MAX_Y 271
+#define TOUCH_MAX_Y 300
 
 // ---------------- LVGL draw buffer ----------------
 // IMPORTANT: These are heap-allocated (not static arrays) because static
@@ -514,11 +670,6 @@ void setup() {
     Serial.println("AD5252 (50k digipot) not found - check wiring.");
   }
 
-  // TGS1820 is a fixed resistor - permanently hide its calibration slider
-  // and label on the setting screen.
-  // lv_obj_add_flag(objects.tgs_1820, LV_OBJ_FLAG_HIDDEN);
-  // lv_obj_add_flag(objects.tgs1820_label, LV_OBJ_FLAG_HIDDEN);
-
   // --- Wire up calibration_bar / calibration_data on the show_data screen ---
   lv_obj_add_event_cb(objects.calibration_bar, calibration_bar_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
   lv_obj_add_event_cb(objects.show_data, show_data_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
@@ -551,12 +702,22 @@ void loop() {
   lv_timer_handler();
   ui_tick();
 
+  // --- Handle incoming PC commands (heartbeat, calibration, settings request) ---
+  handle_serial_commands();
+
+  // --- PC connection timeout: no recognized traffic for PC_TIMEOUT_MS means gone ---
+  if (pc_connected && millis() - last_pc_heartbeat_ms > PC_TIMEOUT_MS) {
+    pc_connected = false;
+  }
+
   // --- Update temperature/humidity labels on the show_data screen ---
   if (aht_ok && millis() - last_sensor_read >= SENSOR_READ_INTERVAL_MS) {
     last_sensor_read = millis();
 
     sensors_event_t humidity_event, temp_event;
     aht.getEvent(&humidity_event, &temp_event);
+    last_temperature_c = temp_event.temperature;
+    last_humidity_rh = humidity_event.relative_humidity;
 
     char temp_buf[16];
     char hum_buf[16];
@@ -571,6 +732,12 @@ void loop() {
   if (millis() - last_graph_update >= GRAPH_UPDATE_INTERVAL_MS) {
     last_graph_update = millis();
     update_graph();
+  }
+
+  // --- Stream all 7 sensors + temp/humidity to the PC, only while connected ---
+  if (pc_connected && millis() - last_data_stream_ms >= GRAPH_UPDATE_INTERVAL_MS) {
+    last_data_stream_ms = millis();
+    send_current_data_to_pc();
   }
 
   delay(5);
