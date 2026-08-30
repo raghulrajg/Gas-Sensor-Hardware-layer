@@ -169,28 +169,70 @@ static bool pc_connected = false;
 static unsigned long last_pc_heartbeat_ms = 0;
 const unsigned long PC_TIMEOUT_MS = 3000;
 
-// Pushes an unsolicited "C:<gas_index>:<value>\n" to the PC so it stays in
+// Pushes an unsolicited "C:<gas_index>:<ohms>\n" to the PC so it stays in
 // sync when the value changed locally (on-device slider), not from a PC
-// command. Only sent while a PC is actually connected.
-static void notify_pc_calibration(sensor_config_t *cfg, int32_t raw_value) {
+// command. Only sent while a PC is actually connected. ohm_value is the
+// actual resistance in ohms (not a 0-100 percentage).
+static void notify_pc_calibration(sensor_config_t *cfg, int32_t ohm_value) {
   if (!pc_connected || !cfg) return;
   Serial.print("C:");
   Serial.print(cfg->gas_index);
   Serial.print(":");
-  Serial.println((float)raw_value, 2);
+  Serial.println(ohm_value);
 }
 
-// ---------------- calibration_bar / calibration_data (show_data screen) ----------------
-// show_data has ONE slider (calibration_bar) and ONE value label
-// (calibration_data), reused for whichever sensor was tapped on the
-// sensor_list screen. Which sensor that was is tracked by the EEZ Flow
-// global variable Sensor_ID (a text value, e.g. "TGS825") - the flow
-// already sets this when navigating here, and it's what drives the
-// sensor name shown at the top of this screen. We read that same
-// variable to pick the sensor's config (range + digipot).
+// ---------------- Calibration: single source of truth for BOTH screens ----------------
+// show_data has ONE shared slider (calibration_bar) for whichever sensor is
+// active (tracked by the EEZ Flow variable Sensor_ID), and the setting
+// screen has its own dedicated slider per sensor. Whichever one the user
+// actually drags, this function updates the digipot AND both UI widgets
+// (setting-screen slider/label, and - if this sensor is the one currently
+// shown - show_data's slider/label too), so the two screens never drift
+// out of sync with each other.
+//
+// Sliders use their sensor's actual ohm range as their LVGL range (set in
+// setup(), and re-set on calibration_bar whenever the active sensor
+// changes) instead of the default 0-100 - so slider values ARE ohms
+// directly, with no lossy 0-100 round-trip losing precision.
 #include "vars.h"
 #include "structs.h"
 
+static void apply_calibration(sensor_config_t *cfg, int32_t ohm_value) {
+  if (!cfg || cfg->pot_type == DIGIPOT_NONE) return;
+  if (ohm_value < 0) ohm_value = 0;
+  if (ohm_value > cfg->pot_out_max) ohm_value = cfg->pot_out_max;
+
+  // ohm_value maps to the digipot's wiper INVERTED (255->0): max
+  // resistance selected == wiper value 0.
+  uint8_t pot_raw = (uint8_t)lv_map(ohm_value, 0, cfg->pot_out_max, 255, 0);
+  write_digipot(cfg, pot_raw);
+
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%ld", (long)ohm_value);
+
+  // Setting screen's own slider/label for this sensor.
+  if (cfg->slider) {
+    lv_slider_set_value(*(cfg->slider), ohm_value, LV_ANIM_OFF);
+    lv_label_set_text(*(cfg->label), buf);
+  }
+
+  // show_data's shared slider/label, only if this sensor is the one
+  // currently displayed there.
+  const char *active_sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
+  if (active_sensor_id && strcmp(active_sensor_id, cfg->name) == 0) {
+    lv_slider_set_range(objects.calibration_bar, 0, cfg->pot_out_max);
+    lv_slider_set_value(objects.calibration_bar, ohm_value, LV_ANIM_OFF);
+    char buf2[24];
+    snprintf(buf2, sizeof(buf2), "%ld ohm", (long)ohm_value);
+    lv_label_set_text(objects.calibration_data, buf2);
+  }
+}
+
+// Shows/hides calibration_bar + calibration_data for whichever sensor is
+// active, and re-syncs both from that sensor's setting-screen slider - the
+// actual source of truth - rather than reusing calibration_bar's previous
+// position (which may still belong to a different sensor/range). Used at
+// boot and whenever show_data becomes the active screen.
 static void update_calibration_data() {
   const char *sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
   sensor_config_t *cfg = find_sensor_config(sensor_id);
@@ -205,30 +247,25 @@ static void update_calibration_data() {
   lv_obj_clear_flag(objects.calibration_bar, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(objects.calibration_data, LV_OBJ_FLAG_HIDDEN);
 
-  int32_t raw = lv_slider_get_value(objects.calibration_bar); // 0-100 (LVGL default slider range)
-  int32_t ohm_value = lv_map(raw, 0, 100, 0, cfg->pot_out_max);
+  lv_slider_set_range(objects.calibration_bar, 0, cfg->pot_out_max);
 
-  char buf[24];
-  snprintf(buf, sizeof(buf), "%ld ohm", (long)ohm_value);
-  lv_label_set_text(objects.calibration_data, buf);
-
-  // Slider's 0->max ohms maps to the digipot's wiper INVERTED (255->0):
-  // max resistance selected == wiper value 0.
-  uint8_t pot_raw = (uint8_t)lv_map(ohm_value, 0, cfg->pot_out_max, 255, 0);
-  write_digipot(cfg, pot_raw);
+  // Fetch the CURRENT value from this sensor's own setting-screen slider -
+  // the authoritative per-sensor value - not calibration_bar's old
+  // position.
+  int32_t ohm_value = cfg->slider ? lv_slider_get_value(*(cfg->slider)) : 0;
+  apply_calibration(cfg, ohm_value);
 }
 
-// Live update while dragging the slider. Also pushes the new value to the
-// PC (if connected), since this is a locally (physically) driven change.
+// Live update while dragging the show_data slider. Also pushes the new
+// value to the PC (if connected), since this is a locally driven change.
 static void calibration_bar_event_cb(lv_event_t *e) {
-  update_calibration_data();
-
   const char *sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
   sensor_config_t *cfg = find_sensor_config(sensor_id);
-  if (cfg && cfg->pot_type != DIGIPOT_NONE) {
-    int32_t raw = lv_slider_get_value(objects.calibration_bar);
-    notify_pc_calibration(cfg, raw);
-  }
+  if (!cfg || cfg->pot_type == DIGIPOT_NONE) return;
+
+  int32_t ohm_value = lv_slider_get_value(objects.calibration_bar); // native ohm range
+  apply_calibration(cfg, ohm_value);
+  notify_pc_calibration(cfg, ohm_value);
 }
 
 // Refresh the range/label whenever show_data becomes the active screen,
@@ -315,19 +352,14 @@ static void update_graph() {
 // has none - fixed resistance). Unlike show_data's single shared slider,
 // these map directly 1:1 - each slider always represents the same sensor -
 // and reuse the same sensor_configs[] table for range + digipot wiring.
+// Live update while dragging a setting-screen slider. Uses the same shared
+// apply_calibration() as the show_data slider, so both screens stay in
+// sync no matter which one triggered the change.
 static void sensor_slider_event_cb(lv_event_t *e) {
   sensor_config_t *cfg = (sensor_config_t *)lv_event_get_user_data(e);
-  int32_t raw = lv_slider_get_value(*(cfg->slider)); // 0-100 (LVGL default slider range)
-  int32_t ohm_value = lv_map(raw, 0, 100, 0, cfg->pot_out_max);
-
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%ld", (long)ohm_value);
-  lv_label_set_text(*(cfg->label), buf);
-
-  uint8_t pot_raw = (uint8_t)lv_map(ohm_value, 0, cfg->pot_out_max, 255, 0);
-  write_digipot(cfg, pot_raw);
-
-  notify_pc_calibration(cfg, raw);
+  int32_t ohm_value = lv_slider_get_value(*(cfg->slider)); // native ohm range (set in setup())
+  apply_calibration(cfg, ohm_value);
+  notify_pc_calibration(cfg, ohm_value);
 }
 
 // ---------------- PC application link ----------------
@@ -359,47 +391,30 @@ static uint8_t serial_line_len = 0;
 // the digipot, and keeps both the setting-screen slider and (if that
 // sensor is the one currently shown) the show_data screen's shared slider
 // in visual sync with the PC's value.
-static void apply_pc_calibration(int gas_index, float value_0_100) {
-  if (value_0_100 < 0) value_0_100 = 0;
-  if (value_0_100 > 100) value_0_100 = 100;
-
+// gas_index maps to the sensor per config.py; ohm_value is the actual
+// resistance in ohms the PC wants set (not a 0-100 percentage).
+static void apply_pc_calibration(int gas_index, float ohm_value_f) {
   sensor_config_t *cfg = find_sensor_by_gas_index(gas_index);
   if (!cfg) return; // unknown index - ignore
-
   if (cfg->pot_type == DIGIPOT_NONE) return; // e.g. TGS1820 - nothing to apply
 
-  int32_t ohm_value = lv_map((int32_t)(value_0_100 * 10), 0, 1000, 0, cfg->pot_out_max);
-  uint8_t pot_raw = (uint8_t)lv_map(ohm_value, 0, cfg->pot_out_max, 255, 0);
-  write_digipot(cfg, pot_raw);
+  apply_calibration(cfg, (int32_t)ohm_value_f); // updates digipot + both screens' sliders/labels
 
-  if (cfg->slider) {
-    lv_slider_set_value(*(cfg->slider), (int32_t)value_0_100, LV_ANIM_OFF);
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%ld", (long)ohm_value);
-    lv_label_set_text(*(cfg->label), buf);
-  }
-
-  // If this sensor is also the one currently shown on show_data, keep that
-  // screen's shared slider/label in sync too.
-  const char *active_sensor_id = flow::getGlobalVariable(FLOW_GLOBAL_VARIABLE_SENSOR_ID).getString();
-  if (active_sensor_id && strcmp(active_sensor_id, cfg->name) == 0) {
-    lv_slider_set_value(objects.calibration_bar, (int32_t)value_0_100, LV_ANIM_OFF);
-    update_calibration_data();
-  }
+  // No notify_pc_calibration here - the PC already knows (it sent this
+  // value), echoing it back would just be redundant traffic.
 }
 
-// Replies to "R:SETTINGS" with each sensor's current calibration, one
-// "C:<gas_index>:<value>\n" line per sensor, in gas_index order.
+// Replies to "R:SETTINGS" with each sensor's current calibration in ohms,
+// one "C:<gas_index>:<ohms>\n" line per sensor, in gas_index order.
 static void send_settings_to_pc() {
   for (int idx = 1; idx <= 7; idx++) {
     sensor_config_t *cfg = find_sensor_by_gas_index(idx);
     if (!cfg) continue;
-    float value = 0;
-    if (cfg->slider) value = (float)lv_slider_get_value(*(cfg->slider));
+    int32_t ohm_value = cfg->slider ? lv_slider_get_value(*(cfg->slider)) : 0;
     Serial.print("C:");
     Serial.print(idx);
     Serial.print(":");
-    Serial.println(value, 2);
+    Serial.println(ohm_value);
   }
 }
 
@@ -709,6 +724,9 @@ void setup() {
   // (skips TGS1820, whose slider field is NULL - fixed resistance)
   for (size_t i = 0; i < sizeof(sensor_configs) / sizeof(sensor_configs[0]); i++) {
     if (sensor_configs[i].slider == NULL) continue;
+    // Give each slider its sensor's real ohm range instead of LVGL's
+    // default 0-100, so its value IS ohms directly (see apply_calibration).
+    lv_slider_set_range(*(sensor_configs[i].slider), 0, sensor_configs[i].pot_out_max);
     lv_obj_add_event_cb(*(sensor_configs[i].slider), sensor_slider_event_cb, LV_EVENT_VALUE_CHANGED, &sensor_configs[i]);
     lv_obj_send_event(*(sensor_configs[i].slider), LV_EVENT_VALUE_CHANGED, NULL);
   }
