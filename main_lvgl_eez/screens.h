@@ -17,7 +17,9 @@ enum ScreensEnum {
     SCREEN_ID_ABOUT = 4,
     SCREEN_ID_SENSOR_LIST = 5,
     SCREEN_ID_STARTUP = 6,
-    _SCREEN_ID_LAST = 6
+    SCREEN_ID_FILE_SAVER = 7,
+    SCREEN_ID_FILE_MANAGER = 8,
+    _SCREEN_ID_LAST = 8
 };
 
 typedef struct _objects_t {
@@ -27,19 +29,24 @@ typedef struct _objects_t {
     lv_obj_t *about;
     lv_obj_t *sensor_list;
     lv_obj_t *startup;
+    lv_obj_t *file_saver;
+    lv_obj_t *file_manager;
     lv_obj_t *panel_header;
     lv_obj_t *title;
-    lv_obj_t *about_button;
-    lv_obj_t *setting_label;
-    lv_obj_t *show_data_label;
-    lv_obj_t *about_label;
-    lv_obj_t *setting_button;
-    lv_obj_t *show_data_button;
+    lv_obj_t *obj0;
+    lv_obj_t *panel_live_data;
+    lv_obj_t *show_data_label_3;
+    lv_obj_t *panel_manger;
+    lv_obj_t *file_manager_label;
+    lv_obj_t *panel_about;
+    lv_obj_t *about_label_3;
+    lv_obj_t *panel_setting;
+    lv_obj_t *setting_label_3;
     lv_obj_t *panel_header_1;
     lv_obj_t *title_1;
     lv_obj_t *back_button_1;
     lv_obj_t *back_1;
-    lv_obj_t *obj0;
+    lv_obj_t *obj1;
     lv_obj_t *tgs_825;
     lv_obj_t *tgs_2602;
     lv_obj_t *mq_3;
@@ -52,6 +59,8 @@ typedef struct _objects_t {
     lv_obj_t *mq138_label;
     lv_obj_t *mq137_label;
     lv_obj_t *wsp2110_label;
+    lv_obj_t *recording_button;
+    lv_obj_t *record;
     lv_obj_t *panel_header_2;
     lv_obj_t *title_2;
     lv_obj_t *back_button;
@@ -59,15 +68,15 @@ typedef struct _objects_t {
     lv_obj_t *graph;
     lv_obj_t *calibration_bar;
     lv_obj_t *calibration_data;
-    lv_obj_t *obj1;
+    lv_obj_t *obj2;
     lv_obj_t *temperature;
     lv_obj_t *humidity;
-    lv_obj_t *obj2;
+    lv_obj_t *obj3;
     lv_obj_t *panel_header_3;
     lv_obj_t *title_3;
     lv_obj_t *back_button_2;
     lv_obj_t *back_2;
-    lv_obj_t *obj3;
+    lv_obj_t *obj4;
     lv_obj_t *panel_header_5;
     lv_obj_t *title_5;
     lv_obj_t *button_panel;
@@ -85,8 +94,18 @@ typedef struct _objects_t {
     lv_obj_t *mq3;
     lv_obj_t *mq138;
     lv_obj_t *wsp2110;
-    lv_obj_t *obj4;
+    lv_obj_t *back_button_5;
+    lv_obj_t *back_5;
+    lv_obj_t *obj5;
     lv_obj_t *boot_logo;
+    lv_obj_t *panel_header_6;
+    lv_obj_t *title_6;
+    lv_obj_t *back_button_3;
+    lv_obj_t *back_3;
+    lv_obj_t *panel_header_7;
+    lv_obj_t *title_7;
+    lv_obj_t *back_button_4;
+    lv_obj_t *back_4;
 } objects_t;
 
 extern objects_t objects;
@@ -108,6 +127,12 @@ void tick_screen_sensor_list();
 
 void create_screen_startup();
 void tick_screen_startup();
+
+void create_screen_file_saver();
+void tick_screen_file_saver();
+
+void create_screen_file_manager();
+void tick_screen_file_manager();
 
 void tick_screen_by_id(enum ScreensEnum screenId);
 void tick_screen(int screen_index);

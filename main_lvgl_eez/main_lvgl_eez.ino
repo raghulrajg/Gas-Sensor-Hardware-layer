@@ -77,6 +77,9 @@
 #include <AD5252.h>
 #include <AD5144A.h>
 #include <string.h>
+#include <ctype.h>
+#include <FS.h>
+#include <FFat.h>
 
 #include "ui.h"
 #include "screens.h"
@@ -329,6 +332,48 @@ static void setup_graph() {
   lv_chart_set_update_mode(objects.graph, LV_CHART_UPDATE_MODE_SHIFT);
   lv_chart_set_range(objects.graph, LV_CHART_AXIS_PRIMARY_Y, 0, 5000); // 0-5V in mV
   graph_series = lv_chart_add_series(objects.graph, lv_palette_main(LV_PALETTE_BLUE), LV_CHART_AXIS_PRIMARY_Y);
+
+  // Gridlines: lv_chart_set_axis_tick() isn't available in this LVGL
+  // build, so relying on the div-line count set via lv_chart_set_div_line_count
+  // below instead (default LVGL gridlines).
+  lv_chart_set_div_line_count(objects.graph, 6, 6);
+
+  // Shrink/shift the chart to free up a genuine empty margin on its left
+  // (previously the label was a CHILD of the chart, so LVGL clipped any
+  // part of the rotated text extending past the chart's own boundary -
+  // exactly the cut-off glyphs seen on the real hardware). Right edge
+  // stays the same (28+330 == 12+346 == 358) so nothing else shifts.
+  lv_obj_set_pos(objects.graph, 28, 90);
+  lv_obj_set_size(objects.graph, 330, 180);
+
+  // Y-axis caption, rotated 90 degrees, now a SIBLING of the chart (child
+  // of the show_data screen) positioned in that freed margin - so it's
+  // never clipped by the chart's own bounds.
+  lv_obj_t *voltage_label = lv_label_create(objects.show_data);
+  lv_label_set_text(voltage_label, "Voltage (V)");
+  lv_obj_set_style_text_font(voltage_label, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_transform_pivot_x(voltage_label, LV_PCT(50), 0);
+  lv_obj_set_style_transform_pivot_y(voltage_label, LV_PCT(50), 0);
+  lv_obj_set_style_transform_angle(voltage_label, 900, 0); // 900 = 90.0 degrees (0.1deg units)
+
+  // Compute position from the label's actual measured (pre-rotation) size
+  // instead of guessed pixel offsets. lv_obj_update_layout() forces LVGL
+  // to calculate the label's auto-fit size immediately (normally it isn't
+  // committed until the next layout pass, so reading it right after
+  // creation would return a stale/zero size otherwise).
+  lv_obj_update_layout(voltage_label);
+  int32_t label_w = lv_obj_get_width(voltage_label);
+  int32_t label_h = lv_obj_get_height(voltage_label);
+
+  // Rotating 90 degrees about the label's own center means its rotated
+  // footprint is label_h wide x label_w tall, centered on that same
+  // pivot point. So place the (pre-rotation) label such that its center
+  // lands at the desired final on-screen center: 14px in from the
+  // screen's left edge (centered in the 28px margin freed above),
+  // vertically centered on the chart's own height.
+  int32_t target_center_x = 14;
+  int32_t target_center_y = lv_obj_get_y(objects.graph) + lv_obj_get_height(objects.graph) / 2;
+  lv_obj_set_pos(voltage_label, target_center_x - label_w / 2, target_center_y - label_h / 2);
 
   // Seed the buffer and chart with real initial readings so it isn't
   // empty at boot.
@@ -653,6 +698,225 @@ void go_to_main_screen(lv_timer_t *t) {
   lv_scr_load_anim(objects.main, LV_SCR_LOAD_ANIM_FADE_IN, 300, 0, false);
 }
 
+// ---------------- Recording -> FATFS CSV + file saver/manager screens ----------------
+// Recording_Button on the setting screen toggles logging all 7 sensors +
+// temp/humidity to a temp CSV file in FFat. Stopping recording opens the
+// file_saver screen so the user can name the file (via the on-screen
+// keyboard's OK/tick key), which renames the temp file into its final
+// name. file_manager then lists whatever's been saved.
+#define TEMP_RECORD_PATH "/temp_recording.csv"
+#define MAX_SAVED_FILENAME_LEN 24 // not counting the leading '/' or ".csv" suffix
+
+static bool fatfs_ok = false;
+static bool recording_active = false;
+static fs::File record_file;
+static unsigned long record_start_ms = 0;
+static unsigned long last_record_ms = 0;
+const unsigned long RECORD_INTERVAL_MS = 1000; // one CSV row per second
+
+// The keyboard and textarea on file_saver, and the list container on
+// file_manager, weren't given names in EEZ Studio so they don't appear in
+// objects_t - found here by child index instead. If you rename them in
+// EEZ Studio (any name) and re-export, switch these to objects.<name> -
+// it's more robust than child-index lookup if the screen layout changes.
+static lv_obj_t *file_saver_keyboard = NULL;
+static lv_obj_t *file_saver_textarea = NULL;
+static lv_obj_t *file_manager_list = NULL;
+
+// Shows a red warning panel on top of the given screen for ~2.5 seconds,
+// then removes itself. Used for file-save validation errors.
+static void show_transient_warning(lv_obj_t *parent_screen, const char *message) {
+  lv_obj_t *panel = lv_obj_create(parent_screen);
+  lv_obj_set_size(panel, 380, 80);
+  lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 55);
+  lv_obj_set_style_bg_color(panel, lv_color_hex(0xB00020), 0);
+  lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(panel, 8, 0);
+  lv_obj_set_style_border_width(panel, 0, 0);
+  lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *label = lv_label_create(panel);
+  lv_label_set_text(label, message);
+  lv_obj_set_style_text_color(label, lv_color_white(), 0);
+  lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(label, 350);
+  lv_obj_center(label);
+
+  lv_timer_t *t = lv_timer_create([](lv_timer_t *timer) {
+    lv_obj_del((lv_obj_t *)timer->user_data);
+    lv_timer_del(timer);
+  }, 2500, panel);
+  lv_timer_set_repeat_count(t, 1);
+}
+
+// Writes the header row + starts a new temp CSV, or closes it and stops -
+// toggled by Recording_Button.
+static void recording_button_event_cb(lv_event_t *e) {
+  if (!recording_active) {
+    if (!fatfs_ok) {
+      show_transient_warning(objects.setting, "FATFS not mounted - can't record");
+      return;
+    }
+
+    // Clear out any stale temp file from a previous session (e.g. one
+    // left behind by a crash/reset mid-recording) so we always start
+    // from a genuinely empty file, not leftover/appended content.
+    if (FFat.exists(TEMP_RECORD_PATH)) {
+      FFat.remove(TEMP_RECORD_PATH);
+    }
+
+    record_file = FFat.open(TEMP_RECORD_PATH, FILE_WRITE);
+    if (!record_file) {
+      Serial.printf("FFat.open(%s, FILE_WRITE) failed - free: %u/%u bytes\n",
+        TEMP_RECORD_PATH, (unsigned)(FFat.totalBytes() - FFat.usedBytes()), (unsigned)FFat.totalBytes());
+      show_transient_warning(objects.setting, "Failed to create temp file - check FATFS");
+      return;
+    }
+    record_file.println(
+      "Elapsed (s)\tTGS 825 (ppm)\tTGS 2602 (ppm)\tMQ 137 (ppm)\tTGS 1820 (ppm)\t"
+      "MQ 138 (ppm)\tWSP 2110 (ppm)\tMQ 3 (ppm)\tTemperature (\xC2\xB0" "C)\tHumidity (%RH)"
+    );
+    record_start_ms = millis();
+    last_record_ms = millis();
+    recording_active = true;
+
+    lv_label_set_text(objects.record, "Recording");
+    lv_obj_set_style_bg_color(objects.recording_button, lv_color_hex(0xffE53935), LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    Serial.println("REC:START");
+  } else {
+    recording_active = false;
+    record_file.close();
+    Serial.println("REC:STOP");
+
+    lv_label_set_text(objects.record, "Record");
+    lv_obj_set_style_bg_color(objects.recording_button, lv_color_hex(0xff2196f3), LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    lv_scr_load_anim(objects.file_saver, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+  }
+}
+
+// One CSV row per RECORD_INTERVAL_MS while recording_active - reads all 7
+// sensors directly (same pattern as send_current_data_to_pc), independent
+// of whether a PC is connected.
+static void append_recording_row() {
+  if (!record_file) return;
+
+  float elapsed_s = (millis() - record_start_ms) / 1000.0f;
+
+  char line[200];
+  int offset = snprintf(line, sizeof(line), "%.1f", elapsed_s);
+
+  for (int idx = 1; idx <= 7; idx++) {
+    sensor_config_t *cfg = find_sensor_by_gas_index(idx);
+    float voltage = 0;
+    if (cfg && cfg->ads) {
+      int16_t adc_raw = cfg->ads->readADC_SingleEnded(cfg->ads_channel);
+      voltage = cfg->ads->computeVolts(adc_raw);
+    }
+    // NOTE: same caveat as the live graph/PC stream - this is raw sensor
+    // voltage, not true ppm (needs each sensor's datasheet curve).
+    offset += snprintf(line + offset, sizeof(line) - offset, "\t%.2f", voltage);
+  }
+  offset += snprintf(line + offset, sizeof(line) - offset, "\t%.2f\t%.2f", last_temperature_c, last_humidity_rh);
+
+  record_file.println(line);
+  record_file.flush(); // survive a power loss mid-recording
+}
+
+static bool is_valid_filename_char(char c) {
+  return isalnum((unsigned char)c) || c == '_' || c == '-';
+}
+
+// Fires when the file_saver keyboard's OK/tick key is pressed. Validates
+// the typed name and renames the temp CSV into its final name.
+static void file_saver_keyboard_event_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_READY) return;
+  if (!file_saver_textarea) return;
+
+  const char *name = lv_textarea_get_text(file_saver_textarea);
+
+  if (!name || strlen(name) == 0) {
+    show_transient_warning(objects.file_saver, "Please enter a file name");
+    return;
+  }
+  if (strlen(name) > MAX_SAVED_FILENAME_LEN) {
+    show_transient_warning(objects.file_saver, "File name too long");
+    return;
+  }
+  for (size_t i = 0; i < strlen(name); i++) {
+    if (!is_valid_filename_char(name[i])) {
+      show_transient_warning(objects.file_saver, "Only letters, numbers, - and _ allowed");
+      return;
+    }
+  }
+
+  char full_path[40];
+  snprintf(full_path, sizeof(full_path), "/%s.csv", name);
+
+  if (FFat.exists(full_path)) {
+    show_transient_warning(objects.file_saver, "A file with that name already exists");
+    return;
+  }
+
+  if (!FFat.rename(TEMP_RECORD_PATH, full_path)) {
+    show_transient_warning(objects.file_saver, "Failed to save file - try again");
+    return;
+  }
+
+  lv_scr_load_anim(objects.file_manager, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+}
+
+// Resets the textarea and re-links the keyboard each time file_saver
+// becomes the active screen.
+static void file_saver_screen_loaded_cb(lv_event_t *e) {
+  if (!file_saver_textarea || !file_saver_keyboard) return;
+  lv_textarea_set_text(file_saver_textarea, "");
+  lv_keyboard_set_textarea(file_saver_keyboard, file_saver_textarea);
+}
+
+// Lists every file currently in FATFS each time file_manager loads.
+static void file_manager_screen_loaded_cb(lv_event_t *e) {
+  if (!file_manager_list) return;
+  lv_obj_clean(file_manager_list); // clear previous listing
+
+  fs::File root = FFat.open("/");
+  fs::File file = root.openNextFile();
+  bool any = false;
+  while (file) {
+    if (!file.isDirectory()) {
+      any = true;
+
+      // One card per file: name on the left, size on the right.
+      lv_obj_t *row = lv_obj_create(file_manager_list);
+      lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+      lv_obj_set_style_bg_color(row, lv_color_hex(0xfff0f2f3), 0);
+      lv_obj_set_style_radius(row, 6, 0);
+      lv_obj_set_style_border_width(row, 0, 0);
+      lv_obj_set_style_pad_all(row, 8, 0);
+      lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+      lv_obj_t *name_label = lv_label_create(row);
+      lv_label_set_text(name_label, file.name());
+      lv_obj_set_style_text_font(name_label, &lv_font_montserrat_14, 0);
+      lv_obj_align(name_label, LV_ALIGN_LEFT_MID, 0, 0);
+
+      char size_buf[24];
+      snprintf(size_buf, sizeof(size_buf), "%u bytes", (unsigned)file.size());
+      lv_obj_t *size_label = lv_label_create(row);
+      lv_label_set_text(size_label, size_buf);
+      lv_obj_set_style_text_font(size_label, &lv_font_montserrat_12, 0);
+      lv_obj_set_style_text_color(size_label, lv_color_hex(0xff777777), 0);
+      lv_obj_align(size_label, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
+    file = root.openNextFile();
+  }
+  if (!any) {
+    lv_obj_t *row = lv_label_create(file_manager_list);
+    lv_label_set_text(row, "No files saved yet");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -695,6 +959,47 @@ void setup() {
   // --- Build EEZ Studio UI (all screens: main/setting/show_data/about/
   //     sensor_list/startup) ---
   ui_init();
+
+  // --- FATFS init (for recording/file_saver/file_manager) ---
+  // NOTE: this requires a partition scheme with a FATFS/FFat partition
+  // (Tools -> Partition Scheme in Arduino IDE). Some minimal schemes
+  // have no FATFS partition at all, which would make begin() fail here -
+  // and if it fails, EVERY file operation afterwards (open/exists/rename)
+  // will behave as if nothing exists, which is what a "file not found"
+  // error during recording usually actually means.
+  fatfs_ok = FFat.begin(true); // true = format if mount fails (first-boot safe)
+  if (!fatfs_ok) {
+    Serial.println("FATFS mount failed - check Partition Scheme has a FATFS/FFat partition.");
+  } else {
+    Serial.printf("FATFS ok - total %u bytes, used %u bytes\n",
+      (unsigned)FFat.totalBytes(), (unsigned)FFat.usedBytes());
+  }
+
+  // --- Grab the anonymous file_saver/file_manager widgets by child index
+  //     (see the comment above their declarations for why) ---
+  file_saver_keyboard = lv_obj_get_child(objects.file_saver, 2);
+  file_saver_textarea = lv_obj_get_child(objects.file_saver, 3);
+  file_manager_list = lv_obj_get_child(objects.file_manager, 2);
+  if (file_manager_list) {
+    // Stack file entries vertically with spacing instead of overlapping
+    // at the default (0,0) position, and enable a visible scrollbar for
+    // when there are more files than fit on screen.
+    lv_obj_set_flex_flow(file_manager_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(file_manager_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(file_manager_list, 8, 0);
+    lv_obj_set_style_pad_all(file_manager_list, 8, 0);
+    lv_obj_set_scrollbar_mode(file_manager_list, LV_SCROLLBAR_MODE_ACTIVE);
+  }
+  if (file_saver_textarea) {
+    lv_textarea_set_placeholder_text(file_saver_textarea, "Enter file name");
+  }
+
+  lv_obj_add_event_cb(objects.recording_button, recording_button_event_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(objects.file_saver, file_saver_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
+  if (file_saver_keyboard) {
+    lv_obj_add_event_cb(file_saver_keyboard, file_saver_keyboard_event_cb, LV_EVENT_READY, NULL);
+  }
+  lv_obj_add_event_cb(objects.file_manager, file_manager_screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 
   // --- ADC + digipot hardware init ---
   // Must happen before wiring any slider or calling setup_graph(), since
@@ -785,6 +1090,12 @@ void loop() {
   if (pc_connected && millis() - last_data_stream_ms >= GRAPH_UPDATE_INTERVAL_MS) {
     last_data_stream_ms = millis();
     send_current_data_to_pc();
+  }
+
+  // --- Append one CSV row while recording is active ---
+  if (recording_active && millis() - last_record_ms >= RECORD_INTERVAL_MS) {
+    last_record_ms = millis();
+    append_recording_row();
   }
 
   delay(5);
