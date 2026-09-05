@@ -78,6 +78,7 @@
 #include <AD5144A.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdlib.h>
 #include <FS.h>
 #include <FFat.h>
 
@@ -875,6 +876,84 @@ static void file_saver_screen_loaded_cb(lv_event_t *e) {
   lv_keyboard_set_textarea(file_saver_keyboard, file_saver_textarea);
 }
 
+// ---------------- Delete confirmation dialog ----------------
+static char pending_delete_path[40] = "";
+static lv_obj_t *delete_confirm_panel = NULL;
+
+// Frees the strdup'd path stored on a delete button once that button is
+// itself destroyed (happens whenever the file list is rebuilt).
+static void delete_button_free_cb(lv_event_t *e) {
+  char *path = (char *)lv_event_get_user_data(e);
+  if (path) std::free(path);
+}
+
+static void close_delete_confirm() {
+  if (delete_confirm_panel) {
+    lv_obj_del(delete_confirm_panel);
+    delete_confirm_panel = NULL;
+  }
+}
+
+static void delete_confirm_yes_cb(lv_event_t *e) {
+  if (strlen(pending_delete_path) > 0) {
+    bool ok = FFat.remove(pending_delete_path);
+    Serial.printf("FFat.remove(%s) -> %s\n", pending_delete_path, ok ? "OK" : "FAILED");
+    close_delete_confirm();
+    if (!ok) {
+      show_transient_warning(objects.file_manager, "Delete failed");
+    }
+  } else {
+    close_delete_confirm();
+  }
+  lv_obj_send_event(objects.file_manager, LV_EVENT_SCREEN_LOADED, NULL); // refresh the list
+}
+
+static void delete_confirm_no_cb(lv_event_t *e) {
+  close_delete_confirm();
+}
+
+static void delete_button_clicked_cb(lv_event_t *e) {
+  const char *path = (const char *)lv_event_get_user_data(e);
+  strncpy(pending_delete_path, path, sizeof(pending_delete_path) - 1);
+  pending_delete_path[sizeof(pending_delete_path) - 1] = '\0';
+
+  close_delete_confirm(); // in case one's already open
+
+  delete_confirm_panel = lv_obj_create(objects.file_manager);
+  lv_obj_set_size(delete_confirm_panel, 380, 140);
+  lv_obj_center(delete_confirm_panel);
+  lv_obj_set_style_bg_color(delete_confirm_panel, lv_color_white(), 0);
+  lv_obj_set_style_radius(delete_confirm_panel, 10, 0);
+  lv_obj_set_style_border_width(delete_confirm_panel, 2, 0);
+  lv_obj_set_style_border_color(delete_confirm_panel, lv_color_hex(0xffcccccc), 0);
+  lv_obj_clear_flag(delete_confirm_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *msg = lv_label_create(delete_confirm_panel);
+  char buf[64];
+  snprintf(buf, sizeof(buf), "Delete \"%s\"?", path);
+  lv_label_set_text(msg, buf);
+  lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(msg, 340);
+  lv_obj_align(msg, LV_ALIGN_TOP_MID, 0, 16);
+
+  lv_obj_t *yes_btn = lv_button_create(delete_confirm_panel);
+  lv_obj_set_size(yes_btn, 140, 44);
+  lv_obj_align(yes_btn, LV_ALIGN_BOTTOM_LEFT, 20, -16);
+  lv_obj_set_style_bg_color(yes_btn, lv_color_hex(0xffE53935), 0);
+  lv_obj_add_event_cb(yes_btn, delete_confirm_yes_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *yes_label = lv_label_create(yes_btn);
+  lv_label_set_text(yes_label, "Yes");
+  lv_obj_center(yes_label);
+
+  lv_obj_t *no_btn = lv_button_create(delete_confirm_panel);
+  lv_obj_set_size(no_btn, 140, 44);
+  lv_obj_align(no_btn, LV_ALIGN_BOTTOM_RIGHT, -20, -16);
+  lv_obj_add_event_cb(no_btn, delete_confirm_no_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *no_label = lv_label_create(no_btn);
+  lv_label_set_text(no_label, "No");
+  lv_obj_center(no_label);
+}
+
 // Lists every file currently in FATFS each time file_manager loads.
 static void file_manager_screen_loaded_cb(lv_event_t *e) {
   if (!file_manager_list) return;
@@ -887,7 +966,8 @@ static void file_manager_screen_loaded_cb(lv_event_t *e) {
     if (!file.isDirectory()) {
       any = true;
 
-      // One card per file: name on the left, size on the right.
+      // One card per file: name+size stacked on the left, delete button
+      // on the right.
       lv_obj_t *row = lv_obj_create(file_manager_list);
       lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
       lv_obj_set_style_bg_color(row, lv_color_hex(0xfff0f2f3), 0);
@@ -899,7 +979,7 @@ static void file_manager_screen_loaded_cb(lv_event_t *e) {
       lv_obj_t *name_label = lv_label_create(row);
       lv_label_set_text(name_label, file.name());
       lv_obj_set_style_text_font(name_label, &lv_font_montserrat_14, 0);
-      lv_obj_align(name_label, LV_ALIGN_LEFT_MID, 0, 0);
+      lv_obj_align(name_label, LV_ALIGN_TOP_LEFT, 0, 0);
 
       char size_buf[24];
       snprintf(size_buf, sizeof(size_buf), "%u bytes", (unsigned)file.size());
@@ -907,7 +987,31 @@ static void file_manager_screen_loaded_cb(lv_event_t *e) {
       lv_label_set_text(size_label, size_buf);
       lv_obj_set_style_text_font(size_label, &lv_font_montserrat_12, 0);
       lv_obj_set_style_text_color(size_label, lv_color_hex(0xff777777), 0);
-      lv_obj_align(size_label, LV_ALIGN_RIGHT_MID, 0, 0);
+      lv_obj_align(size_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+      // path_copy is freed automatically (delete_button_free_cb) whenever
+      // this row is destroyed, e.g. the next time the list is rebuilt.
+      const char *fname = file.name();
+      char normalized_path[40];
+      if (fname[0] == '/') {
+        snprintf(normalized_path, sizeof(normalized_path), "%s", fname);
+      } else {
+        // Some ESP32 core versions return the name without a leading
+        // slash, but FFat.remove()/open() need an absolute path - this
+        // mismatch is why deletes were silently failing.
+        snprintf(normalized_path, sizeof(normalized_path), "/%s", fname);
+      }
+      char *path_copy = (char *)malloc(strlen(normalized_path) + 1);
+      if (path_copy) strcpy(path_copy, normalized_path);
+      lv_obj_t *delete_btn = lv_button_create(row);
+      lv_obj_set_size(delete_btn, 56, 32);
+      lv_obj_align(delete_btn, LV_ALIGN_RIGHT_MID, 0, 0);
+      lv_obj_set_style_bg_color(delete_btn, lv_color_hex(0xffE53935), 0);
+      lv_obj_add_event_cb(delete_btn, delete_button_clicked_cb, LV_EVENT_CLICKED, path_copy);
+      lv_obj_add_event_cb(delete_btn, delete_button_free_cb, LV_EVENT_DELETE, path_copy);
+      lv_obj_t *delete_label = lv_label_create(delete_btn);
+      lv_label_set_text(delete_label, "Del");
+      lv_obj_center(delete_label);
     }
     file = root.openNextFile();
   }
