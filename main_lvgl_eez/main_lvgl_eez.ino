@@ -56,6 +56,41 @@
       T_DIN -> GPIO 17
       T_DO  -> GPIO 16
       T_IRQ -> GPIO 25
+
+  ============================================================
+  USB FILE BROWSER (F: protocol) - added on top of the existing
+  Gas-Sensor-Monitor serial protocol (C:/D:/H/R:SETTINGS)
+  ============================================================
+  This reuses the SAME non-blocking line reader
+  (handle_serial_commands / process_serial_line) already used for the
+  gas-monitor PC app - one single source of truth for all Serial RX,
+  since there's only one UART. The new commands are routed first in
+  process_serial_line() and deliberately do NOT touch
+  pc_connected/last_pc_heartbeat_ms, since a file-browser session on
+  the PC is a different client than the gas-monitor app.
+
+    PC -> Device : "F:LIST\n"
+    Device -> PC : "FILE\t<path>\t<size>\n"  (one per file)
+                   "FILE_DONE\n"
+
+    PC -> Device : "F:INFO\n"
+    Device -> PC : "FS_TOTAL\t<bytes>\n" "FS_USED\t<bytes>\n" "FILE_DONE\n"
+
+    PC -> Device : "F:READ:<path>\n"
+    Device -> PC : "FSIZE\t<size>\n" <raw bytes, exactly <size> of them>
+                   "FEND\n"
+                   or "FERR\tNOT_FOUND\n" if the file doesn't exist
+
+    PC -> Device : "F:DEL:<path>\n"
+    Device -> PC : "FOK\tDELETED\n"  or  "FERR\tDELETE_FAILED\n"
+
+  Streams in fixed 512-byte chunks (FILE_XFER_CHUNK) so RAM usage stays
+  flat regardless of file size - same approach as the CSV recording
+  writer elsewhere in this file.
+
+  IMPORTANT: don't run a PC file-browser script and the Gas-Sensor-
+  Monitor app on the same COM port at the same time - both read/write
+  the same serial stream and would scramble each other's output.
 */
 
 // These two defines must come before any LVGL / eez-framework include.
@@ -430,7 +465,9 @@ static void sensor_slider_event_cb(lv_event_t *e) {
 // alongside notify_pc_calibration(), so the slider callbacks can use them.)
 static unsigned long last_data_stream_ms = 0;
 
-static char serial_line_buf[64];
+// Line buffer is 96 bytes (up from 64) so it comfortably fits the F:READ:/
+// F:DEL: file-browser commands below, which carry full FATFS paths.
+static char serial_line_buf[96];
 static uint8_t serial_line_len = 0;
 
 // Applies a PC-driven calibration command to the matching sensor: writes
@@ -464,8 +501,107 @@ static void send_settings_to_pc() {
   }
 }
 
+// ---------------- USB file browser (F: protocol) ----------------
+// See the big comment block near the top of this file for the full
+// protocol description. These handlers reuse FFat (already mounted in
+// setup()) and stream in fixed-size chunks so RAM stays flat regardless
+// of file size - same pattern as append_recording_row()'s CSV writes.
+#define FILE_XFER_CHUNK 512
+
+static void send_file_list() {
+  fs::File root = FFat.open("/");
+  fs::File file = root.openNextFile();
+  while (file) {
+    if (!file.isDirectory()) {
+      const char *fname = file.name();
+      Serial.print("FILE\t");
+      if (fname[0] == '/') {
+        Serial.print(fname);
+      } else {
+        // Some ESP32 core versions return names without a leading slash;
+        // normalize so paths always work with FFat.open()/remove().
+        Serial.print("/");
+        Serial.print(fname);
+      }
+      Serial.print("\t");
+      Serial.println((unsigned long)file.size());
+    }
+    file = root.openNextFile();
+  }
+  Serial.println("FILE_DONE");
+}
+
+static void send_fatfs_info() {
+  Serial.printf("FS_TOTAL\t%llu\n", FFat.totalBytes());
+  Serial.printf("FS_USED\t%llu\n", FFat.usedBytes());
+  Serial.println("FILE_DONE");
+}
+
+// Streams a file's raw bytes to the PC in fixed 512-byte chunks. This
+// blocks loop() while it runs (same tradeoff append_recording_row()
+// accepts), so LVGL/ui_tick are pumped every few chunks to avoid a fully
+// frozen screen during a large-file download.
+static void send_file_over_serial(const String &path) {
+  fs::File file = FFat.open(path, FILE_READ);
+  if (!file) {
+    Serial.println("FERR\tNOT_FOUND");
+    return;
+  }
+
+  uint32_t size = file.size();
+  Serial.print("FSIZE\t");
+  Serial.println(size);
+
+  uint8_t buf[FILE_XFER_CHUNK];
+  uint32_t remaining = size;
+  uint16_t chunk_count = 0;
+  while (remaining > 0) {
+    size_t n = file.read(buf, min((uint32_t)FILE_XFER_CHUNK, remaining));
+    Serial.write(buf, n);
+    remaining -= n;
+
+    if (++chunk_count % 8 == 0) {
+      lv_timer_handler();
+      ui_tick();
+    }
+  }
+  file.close();
+  Serial.println();
+  Serial.println("FEND");
+}
+
+static void delete_file_over_serial(const String &path) {
+  if (FFat.remove(path)) {
+    Serial.println("FOK\tDELETED");
+  } else {
+    Serial.println("FERR\tDELETE_FAILED");
+  }
+}
+
 // Parses one complete line received from the PC.
 static void process_serial_line(const char *line) {
+  // ---- File-browser commands (F:) - handled first, independently of the
+  // Gas-Sensor-Monitor protocol below. Deliberately does NOT touch
+  // pc_connected/last_pc_heartbeat_ms, since this is a different PC-side
+  // client than the gas-monitor app. ----
+  if (strcmp(line, "F:LIST") == 0) {
+    send_file_list();
+    return;
+  }
+  if (strcmp(line, "F:INFO") == 0) {
+    send_fatfs_info();
+    return;
+  }
+  if (strncmp(line, "F:READ:", 7) == 0) {
+    send_file_over_serial(String(line + 7));
+    return;
+  }
+  if (strncmp(line, "F:DEL:", 6) == 0) {
+    delete_file_over_serial(String(line + 6));
+    return;
+  }
+
+  // ---- Gas-Sensor-Monitor protocol (unchanged) ----
   // Any recognized traffic (heartbeat included) counts as "PC present".
   last_pc_heartbeat_ms = millis();
   pc_connected = true;
@@ -1064,7 +1200,7 @@ void setup() {
   //     sensor_list/startup) ---
   ui_init();
 
-  // --- FATFS init (for recording/file_saver/file_manager) ---
+  // --- FATFS init (for recording/file_saver/file_manager/USB file browser) ---
   // NOTE: this requires a partition scheme with a FATFS/FFat partition
   // (Tools -> Partition Scheme in Arduino IDE). Some minimal schemes
   // have no FATFS partition at all, which would make begin() fail here -
@@ -1158,7 +1294,8 @@ void loop() {
   lv_timer_handler();
   ui_tick();
 
-  // --- Handle incoming PC commands (heartbeat, calibration, settings request) ---
+  // --- Handle incoming PC commands (heartbeat, calibration, settings
+  //     request, and USB file-browser F: commands) ---
   handle_serial_commands();
 
   // --- PC connection timeout: no recognized traffic for PC_TIMEOUT_MS means gone ---

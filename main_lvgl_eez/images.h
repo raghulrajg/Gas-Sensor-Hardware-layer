@@ -13,6 +13,8 @@ extern const lv_img_dsc_t img_gas_sensor;
 extern const lv_img_dsc_t img_about;
 extern const lv_img_dsc_t img_boot_logo;
 extern const lv_img_dsc_t img_file_manager;
+extern const lv_img_dsc_t img_bite;
+extern const lv_img_dsc_t img_sastra;
 
 #ifndef EXT_IMG_DESC_T
 #define EXT_IMG_DESC_T
@@ -22,7 +24,7 @@ typedef struct _ext_img_desc_t {
 } ext_img_desc_t;
 #endif
 
-extern const ext_img_desc_t images[6];
+extern const ext_img_desc_t images[8];
 
 #ifdef __cplusplus
 }

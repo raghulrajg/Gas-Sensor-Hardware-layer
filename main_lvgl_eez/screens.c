@@ -13,7 +13,7 @@
 objects_t objects;
 
 static const char *screen_names[] = { "Main", "Setting", "Show Data", "About", "Sensor List", "startup", "file_saver", "FIle Manager" };
-static const char *object_names[] = { "main", "setting", "show_data", "about", "sensor_list", "startup", "file_saver", "file_manager", "panel_header", "title", "obj0", "panel_live_data", "show_data_label_3", "panel_manger", "file_manager_label", "panel_about", "about_label_3", "panel_setting", "setting_label_3", "panel_header_1", "title_1", "back_button_1", "back_1", "obj1", "tgs_825", "tgs_2602", "mq_3", "mq_138", "mq_137", "wsp_2110", "tgs825_label", "tgs2602_label", "mq3_label", "mq138_label", "mq137_label", "wsp2110_label", "recording_button", "record", "panel_header_2", "title_2", "back_button", "back", "graph", "calibration_bar", "calibration_data", "obj2", "temperature", "humidity", "obj3", "panel_header_3", "title_3", "back_button_2", "back_2", "obj4", "panel_header_5", "title_5", "button_panel", "tgs825_button", "tgs2602_button", "wsp2110_button", "mq138_button", "tgs1820_button", "mq3_button", "mq137_button", "tgs825", "tgs2602", "tgs1820", "mq137", "mq3", "mq138", "wsp2110", "back_button_5", "back_5", "obj5", "boot_logo", "panel_header_6", "title_6", "back_button_3", "back_3", "panel_header_7", "title_7", "back_button_4", "back_4" };
+static const char *object_names[] = { "main", "setting", "show_data", "about", "sensor_list", "startup", "file_saver", "file_manager", "panel_header", "title", "obj0", "panel_live_data", "show_data_label_3", "panel_manger", "file_manager_label", "panel_about", "about_label_3", "panel_setting", "setting_label_3", "panel_header_1", "title_1", "back_button_1", "back_1", "obj1", "tgs_825", "tgs_2602", "mq_3", "mq_138", "mq_137", "wsp_2110", "tgs825_label", "tgs2602_label", "mq3_label", "mq138_label", "mq137_label", "wsp2110_label", "recording_button", "record", "panel_header_2", "title_2", "back_button", "back", "graph", "calibration_bar", "calibration_data", "obj2", "temperature", "humidity", "obj3", "panel_header_3", "title_3", "back_button_2", "back_2", "obj4", "panel_header_5", "title_5", "button_panel", "tgs825_button", "tgs2602_button", "wsp2110_button", "mq138_button", "tgs1820_button", "mq3_button", "mq137_button", "tgs825", "tgs2602", "tgs1820", "mq137", "mq3", "mq138", "wsp2110", "back_button_5", "back_5", "obj5", "boot_logo", "title_4", "title_8", "title_9", "panel_header_6", "title_6", "back_button_3", "back_3", "panel_header_7", "title_7", "back_button_4", "back_4" };
 
 //
 // Event handlers
@@ -440,7 +440,7 @@ void create_screen_setting() {
             lv_obj_set_pos(obj, 203, 57);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             lv_obj_set_style_text_font(obj, &lv_font_montserrat_20, LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_label_set_text(obj, "Setting");
+            lv_label_set_text(obj, "Settings");
         }
         {
             lv_obj_t *obj = lv_obj_create(parent_obj);
@@ -1089,17 +1089,59 @@ void create_screen_startup() {
             objects.obj5 = obj;
             lv_obj_set_pos(obj, 0, 0);
             lv_obj_set_size(obj, 480, 320);
-            lv_obj_set_style_bg_color(obj, lv_color_hex(0xff000000), LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_radius(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_bg_color(obj, lv_color_hex(0xff000000), LV_PART_MAIN | LV_STATE_DEFAULT);
         }
         {
             // boot logo
             lv_obj_t *obj = lv_image_create(parent_obj);
             objects.boot_logo = obj;
-            lv_obj_set_pos(obj, 190, 114);
+            lv_obj_set_pos(obj, 190, 211);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             lv_image_set_src(obj, &img_boot_logo);
+        }
+        {
+            lv_obj_t *obj = lv_image_create(parent_obj);
+            lv_obj_set_pos(obj, 72, 104);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_image_set_src(obj, &img_sastra);
+        }
+        {
+            lv_obj_t *obj = lv_image_create(parent_obj);
+            lv_obj_set_pos(obj, 290, 104);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_image_set_src(obj, &img_bite);
+        }
+        {
+            // Title_4
+            lv_obj_t *obj = lv_label_create(parent_obj);
+            objects.title_4 = obj;
+            lv_obj_set_pos(obj, 174, 15);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_style_text_color(obj, lv_color_hex(0xffffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_font(obj, &lv_font_montserrat_20, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_label_set_text(obj, "RT-DiagNose");
+        }
+        {
+            // Title_8
+            lv_obj_t *obj = lv_label_create(parent_obj);
+            objects.title_8 = obj;
+            lv_obj_set_pos(obj, 21, 68);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_style_text_color(obj, lv_color_hex(0xffffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_font(obj, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_label_set_text(obj, "Developed By");
+        }
+        {
+            // Title_9
+            lv_obj_t *obj = lv_label_create(parent_obj);
+            objects.title_9 = obj;
+            lv_obj_set_pos(obj, 21, 185);
+            lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_style_text_color(obj, lv_color_hex(0xffffffff), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_font(obj, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_label_set_text(obj, "Designed By");
         }
     }
     

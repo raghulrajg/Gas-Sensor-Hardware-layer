@@ -98,6 +98,9 @@ typedef struct _objects_t {
     lv_obj_t *back_5;
     lv_obj_t *obj5;
     lv_obj_t *boot_logo;
+    lv_obj_t *title_4;
+    lv_obj_t *title_8;
+    lv_obj_t *title_9;
     lv_obj_t *panel_header_6;
     lv_obj_t *title_6;
     lv_obj_t *back_button_3;
