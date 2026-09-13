@@ -44,6 +44,8 @@
       EEZ Studio's own "Export as Arduino/PlatformIO project" if you
       don't already have it - it is NOT optional, ui.c/screens.c will
       not compile without it.
+    - SD / FS               (bundled with the ESP32 Arduino core - no
+      separate install needed)
 
   TFT_eSPI User_Setup.h (unchanged from your example):
       Driver: ILI9488_DRIVER
@@ -56,6 +58,17 @@
       T_DIN -> GPIO 17
       T_DO  -> GPIO 16
       T_IRQ -> GPIO 25
+
+  WIRING (SD card - shares the SAME HSPI bus as touch above, own CS pin):
+      SD_SCK  -> GPIO 14 (same as T_CLK)
+      SD_MOSI -> GPIO 17 (same as T_DIN)
+      SD_MISO -> GPIO 16 (same as T_DO)
+      SD_CS_PIN   -> GPIO 5
+      Card should be formatted FAT32. Any capacity the SD library / your
+      ESP32 core supports works (this replaces the old internal-flash
+      FATFS partition, which was capped at whatever slice of the
+      module's flash chip the partition table gave it - a real SD card
+      gets you GBs instead of a few hundred KB/MB).
 
   ============================================================
   USB FILE BROWSER (F: protocol) - added on top of the existing
@@ -114,11 +127,23 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
-#include <FS.h>
-#include <FFat.h>
+#include "SdFat.h"
 
 #include "ui.h"
 #include "screens.h"
+
+// ---------------- SD card ----------------
+// Shares touchSPI's bus (SCK=14, MISO=16, MOSI=17 - identical to the
+// touch controller's pins), with its own CS line. This replaces the old
+// internal-flash FATFS/FFat partition so recordings and saved files are
+// limited by the SD card's capacity instead of a small flash partition.
+static bool sd_ok = false;
+
+const uint8_t SD_CS_PIN   = 5;
+
+SdFs sd;              // SdFs supports both exFAT and FAT32
+FsFile record_file;   // Replace the old FsFile declaration
+char fname[64];
 
 // ---------------- Temperature / Humidity sensor (AHT10, I2C) ----------------
 Adafruit_AHT10 aht;
@@ -466,7 +491,7 @@ static void sensor_slider_event_cb(lv_event_t *e) {
 static unsigned long last_data_stream_ms = 0;
 
 // Line buffer is 96 bytes (up from 64) so it comfortably fits the F:READ:/
-// F:DEL: file-browser commands below, which carry full FATFS paths.
+// F:DEL: file-browser commands below, which carry full SD-card paths.
 static char serial_line_buf[96];
 static uint8_t serial_line_len = 0;
 
@@ -503,23 +528,24 @@ static void send_settings_to_pc() {
 
 // ---------------- USB file browser (F: protocol) ----------------
 // See the big comment block near the top of this file for the full
-// protocol description. These handlers reuse FFat (already mounted in
-// setup()) and stream in fixed-size chunks so RAM stays flat regardless
-// of file size - same pattern as append_recording_row()'s CSV writes.
+// protocol description. These handlers reuse the SD card (already
+// mounted in setup()) and stream in fixed-size chunks so RAM stays flat
+// regardless of file size - same pattern as append_recording_row()'s CSV
+// writes.
 #define FILE_XFER_CHUNK 512
 
 static void send_file_list() {
-  fs::File root = FFat.open("/");
-  fs::File file = root.openNextFile();
+  FsFile root = sd.open("/");
+  FsFile file = root.openNextFile();
   while (file) {
-    if (!file.isDirectory()) {
-      const char *fname = file.name();
+    if (!file.isDir()) {
+      file.getName(fname, sizeof(fname));
       Serial.print("FILE\t");
       if (fname[0] == '/') {
         Serial.print(fname);
       } else {
         // Some ESP32 core versions return names without a leading slash;
-        // normalize so paths always work with FFat.open()/remove().
+        // normalize so paths always work with sd.open()/remove().
         Serial.print("/");
         Serial.print(fname);
       }
@@ -531,10 +557,19 @@ static void send_file_list() {
   Serial.println("FILE_DONE");
 }
 
-static void send_fatfs_info() {
-  Serial.printf("FS_TOTAL\t%llu\n", FFat.totalBytes());
-  Serial.printf("FS_USED\t%llu\n", FFat.usedBytes());
-  float freePercent = ((float)(FFat.totalBytes() - FFat.usedBytes()) / FFat.totalBytes()) * 100.0;
+static void send_storage_info() {
+  uint64_t totalBytes = (uint64_t)sd.clusterCount() * sd.bytesPerCluster();
+  uint64_t freeBytes = (uint64_t)sd.freeClusterCount() * sd.bytesPerCluster();
+  uint64_t usedBytes = totalBytes - freeBytes;
+
+  Serial.printf("FS_TOTAL\t%llu\n", totalBytes);
+  Serial.printf("FS_USED\t%llu\n", usedBytes);
+  
+  float freePercent = 0;
+  if (totalBytes > 0) {
+    freePercent = ((float)freeBytes / totalBytes) * 100.0;
+  }
+  
   Serial.printf("FS_Free\t%.2f%%\n", freePercent);
   Serial.println("FILE_DONE");
 }
@@ -544,7 +579,7 @@ static void send_fatfs_info() {
 // accepts), so LVGL/ui_tick are pumped every few chunks to avoid a fully
 // frozen screen during a large-file download.
 static void send_file_over_serial(const String &path) {
-  fs::File file = FFat.open(path, FILE_READ);
+  FsFile file = sd.open(path, O_RDONLY);
   if (!file) {
     Serial.println("FERR\tNOT_FOUND");
     return;
@@ -573,7 +608,7 @@ static void send_file_over_serial(const String &path) {
 }
 
 static void delete_file_over_serial(const String &path) {
-  if (FFat.remove(path)) {
+  if (sd.remove(path)) {
     Serial.println("FOK\tDELETED");
   } else {
     Serial.println("FERR\tDELETE_FAILED");
@@ -591,7 +626,7 @@ static void process_serial_line(const char *line) {
     return;
   }
   if (strcmp(line, "F:INFO") == 0) {
-    send_fatfs_info();
+    send_storage_info();
     return;
   }
   if (strncmp(line, "F:READ:", 7) == 0) {
@@ -837,18 +872,16 @@ void go_to_main_screen(lv_timer_t *t) {
   lv_scr_load_anim(objects.main, LV_SCR_LOAD_ANIM_FADE_IN, 300, 0, false);
 }
 
-// ---------------- Recording -> FATFS CSV + file saver/manager screens ----------------
+// ---------------- Recording -> SD card CSV + file saver/manager screens ----------------
 // Recording_Button on the setting screen toggles logging all 7 sensors +
-// temp/humidity to a temp CSV file in FFat. Stopping recording opens the
-// file_saver screen so the user can name the file (via the on-screen
+// temp/humidity to a temp CSV file on the SD card. Stopping recording opens
+// the file_saver screen so the user can name the file (via the on-screen
 // keyboard's OK/tick key), which renames the temp file into its final
 // name. file_manager then lists whatever's been saved.
 #define TEMP_RECORD_PATH "/temp_recording.csv"
 #define MAX_SAVED_FILENAME_LEN 24 // not counting the leading '/' or ".csv" suffix
 
-static bool fatfs_ok = false;
 static bool recording_active = false;
-static fs::File record_file;
 static unsigned long record_start_ms = 0;
 static unsigned long last_record_ms = 0;
 const unsigned long RECORD_INTERVAL_MS = 1000; // one CSV row per second
@@ -892,23 +925,22 @@ static void show_transient_warning(lv_obj_t *parent_screen, const char *message)
 // toggled by Recording_Button.
 static void recording_button_event_cb(lv_event_t *e) {
   if (!recording_active) {
-    if (!fatfs_ok) {
-      show_transient_warning(objects.setting, "FATFS not mounted - can't record");
+    if (!sd_ok) {
+      show_transient_warning(objects.setting, "SD card not mounted - can't record");
       return;
     }
 
     // Clear out any stale temp file from a previous session (e.g. one
     // left behind by a crash/reset mid-recording) so we always start
     // from a genuinely empty file, not leftover/appended content.
-    if (FFat.exists(TEMP_RECORD_PATH)) {
-      FFat.remove(TEMP_RECORD_PATH);
+    if (sd.exists(TEMP_RECORD_PATH)) {
+      sd.remove(TEMP_RECORD_PATH);
     }
 
-    record_file = FFat.open(TEMP_RECORD_PATH, FILE_WRITE);
+    record_file = sd.open(TEMP_RECORD_PATH, O_WRONLY | O_CREAT | O_TRUNC);
     if (!record_file) {
-      Serial.printf("FFat.open(%s, FILE_WRITE) failed - free: %u/%u bytes\n",
-        TEMP_RECORD_PATH, (unsigned)(FFat.totalBytes() - FFat.usedBytes()), (unsigned)FFat.totalBytes());
-      show_transient_warning(objects.setting, "Failed to create temp file - check FATFS");
+      Serial.printf("sd.open(%s, FILE_WRITE) failed.\n", TEMP_RECORD_PATH);
+      show_transient_warning(objects.setting, "Failed to create temp file - check SD card");
       return;
     }
     record_file.println(
@@ -993,12 +1025,12 @@ static void file_saver_keyboard_event_cb(lv_event_t *e) {
   char full_path[40];
   snprintf(full_path, sizeof(full_path), "/%s.csv", name);
 
-  if (FFat.exists(full_path)) {
+  if (sd.exists(full_path)) {
     show_transient_warning(objects.file_saver, "A file with that name already exists");
     return;
   }
 
-  if (!FFat.rename(TEMP_RECORD_PATH, full_path)) {
+  if (!sd.rename(TEMP_RECORD_PATH, full_path)) {
     show_transient_warning(objects.file_saver, "Failed to save file - try again");
     return;
   }
@@ -1034,8 +1066,8 @@ static void close_delete_confirm() {
 
 static void delete_confirm_yes_cb(lv_event_t *e) {
   if (strlen(pending_delete_path) > 0) {
-    bool ok = FFat.remove(pending_delete_path);
-    Serial.printf("FFat.remove(%s) -> %s\n", pending_delete_path, ok ? "OK" : "FAILED");
+    bool ok = sd.remove(pending_delete_path);
+    Serial.printf("sd.remove(%s) -> %s\n", pending_delete_path, ok ? "OK" : "FAILED");
     close_delete_confirm();
     if (!ok) {
       show_transient_warning(objects.file_manager, "Delete failed");
@@ -1092,17 +1124,18 @@ static void delete_button_clicked_cb(lv_event_t *e) {
   lv_obj_center(no_label);
 }
 
-// Lists every file currently in FATFS each time file_manager loads.
+// Lists every file currently on the SD card each time file_manager loads.
 static void file_manager_screen_loaded_cb(lv_event_t *e) {
   if (!file_manager_list) return;
   lv_obj_clean(file_manager_list); // clear previous listing
 
-  fs::File root = FFat.open("/");
-  fs::File file = root.openNextFile();
+  FsFile root = sd.open("/");
+  FsFile file = root.openNextFile();
   bool any = false;
   while (file) {
-    if (!file.isDirectory()) {
+    if (!file.isDir()) {
       any = true;
+      file.getName(fname, sizeof(fname));
 
       // One card per file: name+size stacked on the left, delete button
       // on the right.
@@ -1115,7 +1148,7 @@ static void file_manager_screen_loaded_cb(lv_event_t *e) {
       lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
       lv_obj_t *name_label = lv_label_create(row);
-      lv_label_set_text(name_label, file.name());
+      lv_label_set_text(name_label, fname);
       lv_obj_set_style_text_font(name_label, &lv_font_montserrat_14, 0);
       lv_obj_align(name_label, LV_ALIGN_TOP_LEFT, 0, 0);
 
@@ -1129,13 +1162,13 @@ static void file_manager_screen_loaded_cb(lv_event_t *e) {
 
       // path_copy is freed automatically (delete_button_free_cb) whenever
       // this row is destroyed, e.g. the next time the list is rebuilt.
-      const char *fname = file.name();
+      file.getName(fname, sizeof(fname));
       char normalized_path[40];
       if (fname[0] == '/') {
         snprintf(normalized_path, sizeof(normalized_path), "%s", fname);
       } else {
         // Some ESP32 core versions return the name without a leading
-        // slash, but FFat.remove()/open() need an absolute path - this
+        // slash, but sd.remove()/open() need an absolute path - this
         // mismatch is why deletes were silently failing.
         snprintf(normalized_path, sizeof(normalized_path), "/%s", fname);
       }
@@ -1202,19 +1235,24 @@ void setup() {
   //     sensor_list/startup) ---
   ui_init();
 
-  // --- FATFS init (for recording/file_saver/file_manager/USB file browser) ---
-  // NOTE: this requires a partition scheme with a FATFS/FFat partition
-  // (Tools -> Partition Scheme in Arduino IDE). Some minimal schemes
-  // have no FATFS partition at all, which would make begin() fail here -
-  // and if it fails, EVERY file operation afterwards (open/exists/rename)
-  // will behave as if nothing exists, which is what a "file not found"
-  // error during recording usually actually means.
-  fatfs_ok = FFat.begin(true); // true = format if mount fails (first-boot safe)
-  if (!fatfs_ok) {
-    Serial.println("FATFS mount failed - check Partition Scheme has a FATFS/FFat partition.");
+  // --- SD card init (for recording/file_saver/file_manager/USB file
+  //     browser) ---
+  // Reuses touchSPI (already begun above with SCK=14, MISO=16, MOSI=17 -
+  // identical pins to what the SD card needs), just with its own CS pin
+  // (SD_CS_PIN), instead of a second SPIClass object on the same HSPI
+  // peripheral. IMPORTANT: there must be only ONE SPIClass(HSPI) instance
+  // in the whole sketch - two separate SPIClass objects both bound to the
+  // same physical peripheral will fight over its driver state, and
+  // whichever begin() runs last silently corrupts the other (this was the
+  // touch-not-working bug: a second SPIClass sdSPI(HSPI) was re-claiming
+  // the same peripheral touchSPI had already configured).
+  SdSpiConfig config(SD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(16), &touchSPI);
+
+  sd_ok = sd.begin(config);
+  if (!sd_ok) {
+    Serial.println("SD card mount failed - check wiring or format.");
   } else {
-    Serial.printf("FATFS ok - total %u bytes, used %u bytes\n",
-      (unsigned)FFat.totalBytes(), (unsigned)FFat.usedBytes());
+    Serial.println("exFAT SD card mounted successfully!");
   }
 
   // --- Grab the anonymous file_saver/file_manager widgets by child index
