@@ -848,7 +848,7 @@ void create_screen_about() {
             lv_qrcode_set_size(obj, 190);
             lv_qrcode_set_dark_color(obj, lv_color_hex(0xff000000));
             lv_qrcode_set_light_color(obj, lv_color_hex(0xffffffff));
-            lv_qrcode_update(obj, "https://drive.google.com/file/d/1RPgtJLkGu8JaOYKYgd5qDAHwTfCgFFrN/view?usp=sharing", 82);
+            lv_qrcode_update(obj, "RT-DiagNose is design by REDOXTRONICS TECHNOLOGIES LLP", 54);
             lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
         }
     }
