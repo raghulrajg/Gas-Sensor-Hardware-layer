@@ -65,6 +65,7 @@ Gas-Sensor-Hardware-layer/
 ├── main_lvgl_eez/       # Main Arduino sketch: display/touch/LVGL bridge + EEZ Studio UI export
 ├── Helper_script/       # lv_conf.h and User_Setup.h reference configs for display/touch pin setup
 ├── Test/                # Test sketch that sends simulated sensor values to validate the UI
+├── .github/workflows/   # Automatic firmware build and release (see below)
 └── LICENSE              # GPL-3.0
 ```
 
@@ -86,6 +87,31 @@ Install the following via Arduino Library Manager (unless noted):
 3. Open `main_lvgl_eez/main_lvgl_eez.ino` in Arduino IDE. All supporting `.c`/`.h` files must sit flat in the same sketch folder (Arduino does not compile files in subfolders automatically).
 4. Select your ESP32 board, compile, and upload.
 5. Use `Test/` to send simulated sensor values over serial for verifying the UI without the physical sensor array connected.
+
+## Automatic Builds and Firmware Releases
+
+GitHub Actions builds the firmware on every push
+(`.github/workflows/build-firmware.yml`) with the same settings as the
+Arduino IDE builds: ESP32 Dev Module, Flash Size 16MB, Partition Scheme
+"16M Flash (2MB APP/12.5MB FATFS)", ESP32 core 3.2.0, and
+`Helper_script/User_Setup.h` and `Helper_script/lv_conf.h` for the
+libraries. The library versions are pinned in the workflow.
+
+- **Every push:** a test build. Download it from the run's **Artifacts**
+  (Actions tab → the run).
+- **Releasing a version:** Actions → **Build firmware** → **Run workflow**
+  (branch `main`), enter the version, for example `0.4`. The workflow
+  builds the firmware, writes `meta_data.json` (version, date, and the
+  GitHub user who started the release as `checked_by`), commits both to
+  `main_lvgl_eez/build/esp32.esp32.esp32/`, and creates a `v0.4` release.
+  The Gas Sensor Monitor app's **Check for Update** reads that folder, so
+  there is no need to export and commit the build by hand.
+
+The Gas Sensor Monitor app downloads firmware from this repository without
+signing in, so the repository has to stay public for updates to work. If
+you change `lv_conf.h` or `User_Setup.h` in your Arduino libraries folder,
+copy the change into `Helper_script/` as well, since that is what the
+automatic build uses.
 
 ## Boot Behavior
 
