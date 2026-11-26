@@ -113,16 +113,6 @@ jobs:
           ls -l "$OUT_DIR"
           sha256sum "$OUT_DIR"/*.bin
 
-      - name: TEMPORARY - compare LVGL symbols with the released v0.3 binary
-        run: |
-          git show "HEAD:$OUT_DIR/main_lvgl_eez.ino.elf" > /tmp/released.elf
-          syms() { nm --defined-only "$1" | awk '{print $3}' | grep -E '^_?lv_' | sort -u; }
-          syms /tmp/released.elf > /tmp/released.txt
-          syms "$OUT_DIR/main_lvgl_eez.ino.elf" > /tmp/ci.txt
-          echo "lv_ symbols: released=$(wc -l < /tmp/released.txt) ci=$(wc -l < /tmp/ci.txt)"
-          echo "--- only in released:"; comm -23 /tmp/released.txt /tmp/ci.txt | head -100
-          echo "--- only in CI build:"; comm -13 /tmp/released.txt /tmp/ci.txt | head -100
-
       - name: Upload the test build to this workflow run
         if: github.event_name == 'push'
         uses: actions/upload-artifact@v7
