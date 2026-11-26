@@ -35,8 +35,10 @@ env:
   FQBN: esp32:esp32:esp32:FlashSize=16M,PartitionScheme=fatflash
   ESP32_CORE: esp32:esp32@3.2.0
   ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: https://espressif.github.io/arduino-esp32/package_esp32_index.json
-  # eez-framework isn't in the Library Manager; this lets arduino-cli install it from git.
-  ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL: 'true'
+  # eez-framework has no releases, so it is pinned to a commit: the newest one
+  # from before the v0.3 build (1 Sep 2026). Newer commits fail to compile for
+  # the ESP32 (std::this_thread in eez/core/os.cpp).
+  EEZ_FRAMEWORK_COMMIT: 2b11334479f6a43dbc51c398b7e6cb27eb217df7
   SKETCH: main_lvgl_eez
   OUT_DIR: main_lvgl_eez/build/esp32.esp32.esp32
 
@@ -83,17 +85,22 @@ jobs:
         run: |
           arduino-cli core update-index
           arduino-cli core install "$ESP32_CORE"
-          arduino-cli lib install \
+          # Exact versions, including dependencies, so builds don't change by themselves.
+          arduino-cli lib install --no-deps \
             "TFT_eSPI@2.5.43" \
-            "XPT2046_Touchscreen" \
+            "XPT2046_Touchscreen@1.4" \
             "lvgl@9.5.0" \
-            "Adafruit AHT10" \
-            "Adafruit ADS1X15" \
-            "AD5144A" \
-            "AD5252" \
-            "SdFat"
-          arduino-cli lib install --git-url https://github.com/eez-open/eez-framework.git
+            "Adafruit AHT10@0.1.0" \
+            "Adafruit ADS1X15@2.6.2" \
+            "Adafruit BusIO@1.17.4" \
+            "Adafruit Unified Sensor@1.1.15" \
+            "AD5144A@0.4.1" \
+            "AD5252@1.0.0" \
+            "SdFat@2.3.0"
           libraries="$(arduino-cli config get directories.user)/libraries"
+          git init -q "$libraries/eez-framework"
+          git -C "$libraries/eez-framework" fetch -q --depth 1 https://github.com/eez-open/eez-framework.git "$EEZ_FRAMEWORK_COMMIT"
+          git -C "$libraries/eez-framework" checkout -q FETCH_HEAD
           cp Helper_script/User_Setup.h "$libraries/TFT_eSPI/User_Setup.h"
           cp Helper_script/lv_conf.h "$libraries/lv_conf.h"
           arduino-cli lib list
