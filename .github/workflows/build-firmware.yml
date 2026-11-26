@@ -1,0 +1,151 @@
+# Builds the ESP32 firmware (main_lvgl_eez) with arduino-cli.
+#
+#   Every push -> test build. The binaries are attached to the workflow run
+#                 (Actions tab > the run > Artifacts).
+#   Release    -> Actions tab > Build firmware > Run workflow, on main, with a
+#                 version such as 0.4. The build and a new meta_data.json are
+#                 committed to main_lvgl_eez/build/esp32.esp32.esp32/, which is
+#                 where the Gas Sensor Monitor app's "Check for Update" reads
+#                 them, and a GitHub release v<version> is created.
+#
+# Libraries are set up the way the README describes: Helper_script/User_Setup.h
+# replaces TFT_eSPI's own, and Helper_script/lv_conf.h sits next to the lvgl
+# library folder.
+
+name: Build firmware
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Firmware version to release, for example 0.4
+        required: true
+
+# A newer push cancels the older test build of the same branch. Releases have
+# a group of their own, so a push can never cancel a release halfway through.
+concurrency:
+  group: firmware-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  # Same settings as the released builds: board "ESP32 Dev Module", Flash Size
+  # 16MB, Partition Scheme "16M Flash (2MB APP/12.5MB FATFS)", ESP32 core 3.2.0.
+  FQBN: esp32:esp32:esp32:FlashSize=16M,PartitionScheme=fatflash
+  ESP32_CORE: esp32:esp32@3.2.0
+  ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+  # eez-framework has no releases, so it is pinned to a commit: the newest one
+  # from before the v0.3 build (1 Sep 2026). Newer commits fail to compile for
+  # the ESP32 (std::this_thread in eez/core/os.cpp).
+  EEZ_FRAMEWORK_COMMIT: 2b11334479f6a43dbc51c398b7e6cb27eb217df7
+  SKETCH: main_lvgl_eez
+  OUT_DIR: main_lvgl_eez/build/esp32.esp32.esp32
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write  # releases commit the build to main and create a release
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Check the release request
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ inputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Start releases from the $DEFAULT_BRANCH branch, not $GITHUB_REF_NAME."
+            exit 1
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::The version must be numbers and dots, like 0.4 or 1.2.0 (got '$VERSION')."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
+            echo "::error::Version $VERSION was already released. Use a new version number."
+            exit 1
+          fi
+
+      - name: Set up arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache the ESP32 core
+        uses: actions/cache@v6
+        with:
+          path: ~/.arduino15/packages
+          key: arduino-packages-${{ env.ESP32_CORE }}
+
+      - name: Install the ESP32 core and libraries
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install "$ESP32_CORE"
+          # Exact versions, including dependencies, so builds don't change by themselves.
+          arduino-cli lib install --no-deps \
+            "TFT_eSPI@2.5.43" \
+            "XPT2046_Touchscreen@1.4" \
+            "lvgl@9.5.0" \
+            "Adafruit AHT10@0.1.0" \
+            "Adafruit ADS1X15@2.6.2" \
+            "Adafruit BusIO@1.17.4" \
+            "Adafruit Unified Sensor@1.1.15" \
+            "AD5144A@0.4.1" \
+            "AD5252@1.0.0" \
+            "SdFat@2.3.0"
+          libraries="$(arduino-cli config get directories.user)/libraries"
+          git init -q "$libraries/eez-framework"
+          git -C "$libraries/eez-framework" fetch -q --depth 1 https://github.com/eez-open/eez-framework.git "$EEZ_FRAMEWORK_COMMIT"
+          git -C "$libraries/eez-framework" checkout -q FETCH_HEAD
+          cp Helper_script/User_Setup.h "$libraries/TFT_eSPI/User_Setup.h"
+          cp Helper_script/lv_conf.h "$libraries/lv_conf.h"
+          arduino-cli lib list
+
+      - name: Compile
+        run: arduino-cli compile --fqbn "$FQBN" --export-binaries "$SKETCH"
+
+      - name: List the build files
+        run: |
+          ls -l "$OUT_DIR"
+          sha256sum "$OUT_DIR"/*.bin
+
+      - name: Upload the test build to this workflow run
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ github.run_number }}
+          path: |
+            ${{ env.OUT_DIR }}/
+            !${{ env.OUT_DIR }}/meta_data.json
+          if-no-files-found: error
+
+      - name: Release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # meta_data.json is what the app's "Check for Update" dialog shows.
+          jq -n \
+            --arg date "$(TZ=Asia/Kolkata date +%d/%m/%Y)" \
+            --arg version "$VERSION" \
+            --arg checked_by "$GITHUB_ACTOR" \
+            --arg commit "${GITHUB_SHA::7}" \
+            '{date_of_creation: $date, version: $version, checked_by: $checked_by, commit: $commit}' \
+            > "$OUT_DIR/meta_data.json"
+          cat "$OUT_DIR/meta_data.json"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$OUT_DIR"
+          git commit -m "Firmware v$VERSION build"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+
+          gh release create "v$VERSION" "$OUT_DIR"/* \
+            --target "$(git rev-parse HEAD)" \
+            --title "Firmware v$VERSION" \
+            --notes "Firmware $VERSION, built from commit ${GITHUB_SHA::7}. Devices get it through the Gas Sensor Monitor app (Check for Update), or flash main_lvgl_eez.ino.merged.bin at 0x0."
